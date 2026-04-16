@@ -703,7 +703,7 @@ export class N8NDocumentationMCPServer {
 
       const param = cloned.inputSchema?.properties?.[paramName];
       if (param?.enum) {
-        param.enum = (param.enum as string[]).filter(v => !ops.has(v));
+        param.enum = (param.enum as string[]).filter(v => !ops.has(v.toLowerCase()));
         if (param.enum.length === 0) {
           logger.warn(
             `DISABLED_TOOL_OPERATIONS: all operations for '${toolName}' are disabled ` +
