@@ -90,6 +90,31 @@ function logSecurityEvent(
   logger.info(`[SECURITY] ${event}`, logEntry);
 }
 
+/**
+ * Summarize an instance URL without logging credentials, paths, or query strings.
+ */
+function summarizeInstanceUrl(raw?: string): {
+  hasUrl: boolean;
+  protocol?: string;
+  hostname?: string;
+  port?: string;
+  parseError?: boolean;
+} {
+  if (!raw) return { hasUrl: false };
+
+  try {
+    const url = new URL(raw);
+    return {
+      hasUrl: true,
+      protocol: url.protocol,
+      hostname: url.hostname,
+      port: url.port || undefined,
+    };
+  } catch {
+    return { hasUrl: true, parseError: true };
+  }
+}
+
 export interface SingleSessionHTTPServerOptions {
   generateWorkflowHandler?: GenerateWorkflowHandler;
 }
@@ -530,34 +555,43 @@ export class SingleSessionHTTPServer {
     instanceContext?: InstanceContext
   ): Promise<void> {
     const startTime = Date.now();
+    const sessionId = req.headers['mcp-session-id'] as string | undefined;
+
+    // SECURITY (GHSA-4ggg-h7ph-26qr): validate instance-supplied URL before
+    // entering ConsoleManager.wrapOperation, which silences console output
+    // during MCP request handling.
+    if (instanceContext?.n8nApiUrl) {
+      const { SSRFProtection } = await import('./utils/ssrf-protection');
+      const validationStartedAt = Date.now();
+      const ssrfResult = await SSRFProtection.validateWebhookUrl(instanceContext.n8nApiUrl);
+      const validationMs = Date.now() - validationStartedAt;
+      if (!ssrfResult.valid) {
+        logger.warn('Instance URL SSRF validation failed', {
+          reason: ssrfResult.reason,
+          durationMs: validationMs,
+          instanceId: instanceContext.instanceId,
+          sessionId: sessionId ? sessionId.substring(0, 8) + '...' : undefined,
+          requestId: req.get('x-request-id') || 'unknown',
+          body: summarizeMcpBody(req.body),
+          url: summarizeInstanceUrl(instanceContext.n8nApiUrl),
+        });
+        if (!res.headersSent) {
+          res.status(400).json({
+            jsonrpc: '2.0',
+            error: {
+              code: -32602,
+              message: 'Invalid instance configuration'
+            },
+            id: req.body?.id ?? null
+          });
+        }
+        return;
+      }
+    }
     
     // Wrap all operations to prevent console interference
     return this.consoleManager.wrapOperation(async () => {
       try {
-        // SECURITY (GHSA-4ggg-h7ph-26qr): validate instance-supplied URL.
-        if (instanceContext?.n8nApiUrl) {
-          const { SSRFProtection } = await import('./utils/ssrf-protection');
-          const ssrfResult = await SSRFProtection.validateWebhookUrl(instanceContext.n8nApiUrl);
-          if (!ssrfResult.valid) {
-            logger.warn('SSRF protection blocked instance context URL', {
-              reason: ssrfResult.reason,
-              instanceId: instanceContext.instanceId
-            });
-            if (!res.headersSent) {
-              res.status(400).json({
-                jsonrpc: '2.0',
-                error: {
-                  code: -32602,
-                  message: 'Invalid instance configuration'
-                },
-                id: req.body?.id ?? null
-              });
-            }
-            return;
-          }
-        }
-
-        const sessionId = req.headers['mcp-session-id'] as string | undefined;
         const isInitialize = req.body ? isInitializeRequest(req.body) : false;
 
         // SECURITY (GHSA-pfm2-2mhg-8wpx): log body summary only, not payload.
@@ -1370,7 +1404,10 @@ export class SingleSessionHTTPServer {
             logger.warn('Invalid instance context from headers', {
               errors: validation.errors,
               hasUrl: !!hasUrl,
-              hasKey: !!hasKey
+              hasKey: !!hasKey,
+              instanceId: candidate.instanceId,
+              sessionId: candidate.sessionId ? candidate.sessionId.substring(0, 8) + '...' : undefined,
+              url: summarizeInstanceUrl(candidate.n8nApiUrl),
             });
             res.status(400).json({
               jsonrpc: '2.0',
