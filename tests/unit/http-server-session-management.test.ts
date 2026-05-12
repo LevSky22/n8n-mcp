@@ -1343,7 +1343,7 @@ describe('HTTP Server Session Management', () => {
       expect(res.end).toHaveBeenCalled();
     });
 
-    it('should return 400 for request (with id) with stale session ID', async () => {
+    it('should return 404 for request (with id) with stale session ID', async () => {
       server = new SingleSessionHTTPServer();
 
       const { req, res } = createMockReqRes();
@@ -1358,10 +1358,10 @@ describe('HTTP Server Session Management', () => {
 
       await server.handleRequest(req as any, res as any);
 
-      expect(res.status).toHaveBeenCalledWith(400);
+      expect(res.status).toHaveBeenCalledWith(404);
       expect(res.json).toHaveBeenCalledWith(expect.objectContaining({
         error: expect.objectContaining({
-          message: 'Bad Request: Session not found or expired',
+          message: 'Session not found or expired',
         }),
       }));
     });
@@ -1399,7 +1399,7 @@ describe('HTTP Server Session Management', () => {
       expect(res.status).toHaveBeenCalledWith(400);
     });
 
-    it('should return 400 for mixed batch (notification + request) with stale session', async () => {
+    it('should return 404 for mixed batch (notification + request) with stale session', async () => {
       server = new SingleSessionHTTPServer();
 
       const { req, res } = createMockReqRes();
@@ -1412,7 +1412,7 @@ describe('HTTP Server Session Management', () => {
 
       await server.handleRequest(req as any, res as any);
 
-      expect(res.status).toHaveBeenCalledWith(400);
+      expect(res.status).toHaveBeenCalledWith(404);
     });
   });
 });
