@@ -2024,6 +2024,19 @@ return [{"json": {"result": result}}]
         }));
       });
 
+      it('should still check primitive returns in very large code blocks', () => {
+        context.config = {
+          language: 'javaScript',
+          jsCode: `${'const padding = 1;\n'.repeat(12000)}return "too large";`
+        };
+
+        NodeSpecificValidators.validateCode(context);
+
+        expect(context.errors).toContainEqual(expect.objectContaining({
+          message: 'Cannot return primitive values directly'
+        }));
+      });
+
       it('should not error on bare object return in runOnceForEachItem mode', () => {
         context.config = {
           language: 'javaScript',
