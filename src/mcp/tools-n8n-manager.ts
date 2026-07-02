@@ -688,46 +688,6 @@ Old backups are also pruned automatically (10 most recent per workflow, plus an 
     },
   },
   {
-    name: 'n8n_generate_workflow',
-    description: 'Generate an n8n workflow from a natural language description using AI. ' +
-      'Call with just a description to get workflow proposals. ' +
-      'Then call again with deploy_id to deploy a chosen proposal, ' +
-      'or set skip_cache=true to generate a fresh workflow. ' +
-      'Use confirm_deploy=true to deploy a previously generated workflow.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        description: {
-          type: 'string',
-          description: 'Clear description of what the workflow should do. Include: trigger type ' +
-            '(webhook, schedule, manual), services to integrate (Slack, Gmail, etc.), and the logic/flow.'
-        },
-        skip_cache: {
-          type: 'boolean',
-          description: 'Set to true to skip proposals and generate a fresh workflow from scratch. ' +
-            'Returns a preview — call again with confirm_deploy=true to deploy it.'
-        },
-        deploy_id: {
-          type: 'string',
-          description: 'ID of a proposal to deploy. Get proposal IDs from a previous call ' +
-            'that returned status "proposals".'
-        },
-        confirm_deploy: {
-          type: 'boolean',
-          description: 'Set to true to deploy the workflow from the last generation preview.'
-        }
-      },
-      required: ['description'],
-    },
-    annotations: {
-      title: 'Generate Workflow',
-      readOnlyHint: false,
-      destructiveHint: false,
-      idempotentHint: false,
-      openWorldHint: true,
-    },
-  },
-  {
     name: 'n8n_audit_instance',
     description: `Security audit of n8n instance. Combines n8n's built-in audit API (credentials, database, nodes, instance, filesystem risks) with deep workflow scanning (hardcoded secrets via 50+ regex patterns, unauthenticated webhooks, error handling gaps, data retention risks). Returns actionable markdown report with remediation steps using n8n_manage_credentials and n8n_update_partial_workflow.`,
     inputSchema: {

@@ -3,7 +3,6 @@ export * from './node-types';
 export * from './type-structures';
 export * from './instance-context';
 export * from './session-state';
-export * from './generate-workflow';
 export * from './additional-tools';
 
 export interface MCPServerConfig {

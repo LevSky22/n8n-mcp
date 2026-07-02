@@ -161,7 +161,6 @@ When working with Code nodes, always start by calling the relevant guide:
 - n8n_workflow_versions - Version history and rollback
 - n8n_deploy_template - Deploy templates directly to n8n instance
 - n8n_manage_datatable - Manage data tables and rows
-- n8n_generate_workflow - Generate workflow from natural language description
 
 ## Performance Characteristics
 - Instant (<10ms): search_nodes, get_node (minimal/standard)

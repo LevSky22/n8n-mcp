@@ -361,7 +361,7 @@ Save these instructions in your Claude Project for optimal n8n workflow assistan
   - `searchMode: 'by_metadata'` - Filter by `complexity`, `requiredService`, `targetAudience`
 - **`get_template`** - Get complete workflow JSON (modes: nodes_only, structure, full)
 
-### n8n Management Tools (13 tools - Requires API Configuration)
+### n8n Management Tools (16 tools - Requires API Configuration)
 These tools require `N8N_API_URL` and `N8N_API_KEY` in your configuration.
 
 #### Workflow Management
@@ -380,6 +380,9 @@ These tools require `N8N_API_URL` and `N8N_API_KEY` in your configuration.
 - **`n8n_test_workflow`** - Test/trigger workflow execution (webhook, form, chat)
 - **`n8n_executions`** - Unified execution management (list, get, delete)
 
+#### Data Table Management
+- **`n8n_manage_datatable`** - Manage n8n data tables and rows (list, get, create, update, delete)
+
 #### Credential Management
 - **`n8n_manage_credentials`** - Manage n8n credentials (list, get, create, update, delete, getSchema)
 
@@ -391,10 +394,10 @@ These tools require `N8N_API_URL` and `N8N_API_KEY` in your configuration.
 
 ### Read-Only Deployment
 
-For governance-sensitive environments, use both env vars together. Fully disable purely write/destructive tools:
+For governance-sensitive environments, use both env vars together. Fully disable tools that are write/destructive or handle sensitive data (`n8n_manage_credentials` and `n8n_manage_datatable` also offer read operations, but are removed entirely here because even reads expose sensitive material):
 
 ```bash
-DISABLED_TOOLS=n8n_create_workflow,n8n_update_full_workflow,n8n_update_partial_workflow,n8n_delete_workflow,n8n_autofix_workflow,n8n_deploy_template,n8n_test_workflow,n8n_generate_workflow,n8n_manage_credentials,n8n_manage_datatable
+DISABLED_TOOLS=n8n_create_workflow,n8n_update_full_workflow,n8n_update_partial_workflow,n8n_delete_workflow,n8n_autofix_workflow,n8n_deploy_template,n8n_test_workflow,n8n_manage_credentials,n8n_manage_datatable
 ```
 
 For tools that bundle read and write operations under one name, block only the destructive operations while keeping `list` and `get`:

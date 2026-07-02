@@ -2,7 +2,7 @@
   "manifest_version": "0.3",
   "name": "n8n-mcp",
   "display_name": "n8n-MCP",
-  "version": "2.60.0",
+  "version": "2.62.0",
   "description": "MCP server providing AI assistants with comprehensive access to n8n node documentation and workflow management capabilities",
   "author": {
     "name": "Romuald Członkowski",
@@ -169,10 +169,6 @@
     {
       "name": "n8n_manage_credentials",
       "description": "Manage n8n credentials."
-    },
-    {
-      "name": "n8n_generate_workflow",
-      "description": "Generate an n8n workflow from a natural language description using AI."
     },
     {
       "name": "n8n_audit_instance",

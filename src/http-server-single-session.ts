@@ -27,7 +27,6 @@ import {
 } from './utils/protocol-version';
 import { InstanceContext, validateInstanceContext } from './types/instance-context';
 import { SessionState } from './types/session-state';
-import { GenerateWorkflowHandler } from './types/generate-workflow';
 import type { AdditionalTool } from './types/additional-tools';
 import { closeSharedDatabase } from './database/shared-database';
 
@@ -92,7 +91,6 @@ function logSecurityEvent(
 }
 
 export interface SingleSessionHTTPServerOptions {
-  generateWorkflowHandler?: GenerateWorkflowHandler;
   additionalTools?: AdditionalTool[];
 }
 
@@ -119,11 +117,9 @@ export class SingleSessionHTTPServer {
   ) * 60 * 1000;
   private authToken: string | null = null;
   private cleanupTimer: NodeJS.Timeout | null = null;
-  private generateWorkflowHandler?: GenerateWorkflowHandler;
   private additionalTools?: AdditionalTool[];
 
   constructor(options?: SingleSessionHTTPServerOptions) {
-    this.generateWorkflowHandler = options?.generateWorkflowHandler;
     this.additionalTools = options?.additionalTools;
     // Validate environment on construction
     this.validateEnvironment();
@@ -663,7 +659,6 @@ export class SingleSessionHTTPServer {
           }
 
           const server = new N8NDocumentationMCPServer(instanceContext, undefined, {
-            generateWorkflowHandler: this.generateWorkflowHandler,
             additionalTools: this.additionalTools,
           });
 
@@ -876,7 +871,6 @@ export class SingleSessionHTTPServer {
     // Note: SSE sessions do not support multi-tenant context.
     // The SaaS backend uses StreamableHTTP exclusively.
     const server = new N8NDocumentationMCPServer(undefined, undefined, {
-      generateWorkflowHandler: this.generateWorkflowHandler,
       additionalTools: this.additionalTools,
     });
 

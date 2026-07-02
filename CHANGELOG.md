@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.62.0] - 2026-07-02
+
+### Removed
+
+- **Retired the `n8n_generate_workflow` tool.** The tool and its supporting plumbing have been removed: the tool definition, the server-side handler dispatch, the `generateWorkflowHandler` option on `N8NDocumentationMCPServer`, `SingleSessionHTTPServer`, and `N8NMCPEngine`, and the `GenerateWorkflow*` type exports (`GenerateWorkflowArgs`, `GenerateWorkflowResult`, `GenerateWorkflowProposal`, `GenerateWorkflowHandler`, `GenerateWorkflowHelpers`) from the library API. On self-hosted deployments the tool only ever returned a pointer to the hosted service; AI-assisted workflow generation is better served today by the standard build loop (`search_templates` / `n8n_deploy_template` for templates, `n8n_create_workflow` + `n8n_validate_workflow` + `n8n_autofix_workflow` for custom builds). Library consumers that passed `generateWorkflowHandler` must remove that option when upgrading.
+
 ## [2.61.0] - 2026-06-26
 
 ### Changed

@@ -883,10 +883,10 @@ For governance-sensitive environments where the AI agent should be able to read 
 
 **Layer 1 — MCP layer:**
 
-Some tools are purely write/destructive and should be removed entirely via `DISABLED_TOOLS`:
+Some tools are write/destructive or handle sensitive data and should be removed entirely via `DISABLED_TOOLS` (`n8n_manage_credentials` and `n8n_manage_datatable` also offer read operations, but even their reads expose sensitive material):
 
 ```bash
-DISABLED_TOOLS=n8n_create_workflow,n8n_update_full_workflow,n8n_update_partial_workflow,n8n_delete_workflow,n8n_autofix_workflow,n8n_deploy_template,n8n_test_workflow,n8n_generate_workflow,n8n_manage_credentials,n8n_manage_datatable
+DISABLED_TOOLS=n8n_create_workflow,n8n_update_full_workflow,n8n_update_partial_workflow,n8n_delete_workflow,n8n_autofix_workflow,n8n_deploy_template,n8n_test_workflow,n8n_manage_credentials,n8n_manage_datatable
 ```
 
 Two tools bundle read and write operations under a single name. Use `DISABLED_TOOL_OPERATIONS` to block only their destructive branches while keeping `list` and `get`:
