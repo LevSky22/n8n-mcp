@@ -13,6 +13,7 @@ import {
   ExecutionFilterOptions,
   ExecutionMode,
   Credential,
+  TestRunStatus,
 } from '../types/n8n-api';
 import type { TriggerType, TestWorkflowInput } from '../triggers/types';
 import {
@@ -523,6 +524,25 @@ const listExecutionsSchema = z.object({
   projectId: optionalEmptyAware(z.string()),
   status: optionalEmptyAware(z.enum(['success', 'error', 'waiting'])),
   includeData: z.boolean().optional(),
+});
+
+const listTestRunsSchema = z.object({
+  workflowId: z.string(),
+  status: optionalEmptyAware(z.enum(['new', 'running', 'completed', 'error', 'cancelled'])),
+  limit: z.number().min(1).max(250).optional(),
+  cursor: optionalEmptyAware(z.string()),
+});
+
+const getTestRunSchema = z.object({
+  workflowId: z.string(),
+  runId: z.string(),
+});
+
+const listTestCasesSchema = z.object({
+  workflowId: z.string(),
+  runId: z.string(),
+  limit: z.number().min(1).max(250).optional(),
+  cursor: optionalEmptyAware(z.string()),
 });
 
 const workflowVersionsSchema = z.object({
@@ -1912,6 +1932,132 @@ export async function handleDeleteExecution(args: unknown, context?: InstanceCon
       success: false,
       error: error instanceof Error ? error.message : 'Unknown error occurred'
     };
+  }
+}
+
+// Evaluation Test Run Handlers (n8n >= 2.30)
+
+const TEST_RUN_SCOPE_HINT =
+  'n8n rejected the request (403). The API key lacks testRun scopes - keys created before n8n 2.30 do not have them; re-create the API key on n8n 2.30+. Other causes: evaluations not licensed on this plan, or the key\'s owner lacks access to this workflow.';
+
+/**
+ * Builds the error response for the evaluation handlers. Mirrors handleCrudError
+ * but adds evaluation-specific guidance for the three failure modes that are easy
+ * to confuse from raw HTTP statuses alone: a pre-2.30 instance, an API key without
+ * testRun scopes, and a runId that does not belong to the given workflow.
+ */
+async function handleTestRunError(error: unknown, context?: InstanceContext): Promise<McpToolResponse> {
+  if (error instanceof z.ZodError) {
+    return { success: false, error: 'Invalid input', details: { errors: error.errors } };
+  }
+  if (error instanceof N8nApiError) {
+    if (error.statusCode === 403) {
+      return { success: false, error: TEST_RUN_SCOPE_HINT, code: error.code };
+    }
+    if (error.statusCode === 404) {
+      // A 404 from a pre-2.30 instance means the endpoint doesn't exist, not
+      // that the ids are wrong. The version cache is usually cold on a fresh
+      // session, so fetch it (one extra request, failure path only).
+      const client = getN8nApiClient(context);
+      let version = client?.getCachedVersionInfo() ?? null;
+      if (!version && client) {
+        version = await client.getVersion().catch(() => null);
+      }
+      if (version && (version.major < 2 || (version.major === 2 && version.minor < 30))) {
+        return {
+          success: false,
+          error: `The evaluation API requires n8n 2.30 or later; this instance runs ${version.version}. Upgrade the instance to read test runs.`,
+          code: error.code,
+        };
+      }
+      return {
+        success: false,
+        error: 'Workflow or test run not found. A runId must belong to the given workflowId; check both ids.',
+        code: error.code,
+      };
+    }
+    return { success: false, error: getUserFriendlyErrorMessage(error), code: error.code };
+  }
+  return { success: false, error: error instanceof Error ? error.message : 'Unknown error occurred' };
+}
+
+export async function handleListTestRuns(args: unknown, context?: InstanceContext): Promise<McpToolResponse> {
+  try {
+    const client = ensureApiConfigured(context);
+    const input = listTestRunsSchema.parse(args || {});
+
+    // Send limit only when the caller sets one: n8n's server default is the
+    // same 100, and pre-2.30 instances (no test-runs routes) reject unknown
+    // query params before returning the 404 our error mapping explains.
+    const response = await client.listTestRuns(input.workflowId, {
+      status: input.status as TestRunStatus | undefined,
+      limit: input.limit,
+      cursor: input.cursor,
+    });
+
+    const note = response.data.length === 0
+      ? (input.status
+          ? `No test runs with status '${input.status}' for this workflow.`
+          : 'No test runs. Runs exist only for workflows with an evaluation trigger that have been executed at least once.')
+      : response.nextCursor
+        ? 'More test runs available. Use cursor to get next page.'
+        : undefined;
+
+    return {
+      success: true,
+      data: {
+        testRuns: response.data,
+        returned: response.data.length,
+        nextCursor: response.nextCursor,
+        hasMore: !!response.nextCursor,
+        ...(note ? { _note: note } : {})
+      }
+    };
+  } catch (error) {
+    return handleTestRunError(error, context);
+  }
+}
+
+export async function handleGetTestRun(args: unknown, context?: InstanceContext): Promise<McpToolResponse> {
+  try {
+    const client = ensureApiConfigured(context);
+    const input = getTestRunSchema.parse(args || {});
+
+    const response = await client.getTestRun(input.workflowId, input.runId);
+
+    return {
+      success: true,
+      data: response
+    };
+  } catch (error) {
+    return handleTestRunError(error, context);
+  }
+}
+
+export async function handleListTestCases(args: unknown, context?: InstanceContext): Promise<McpToolResponse> {
+  try {
+    const client = ensureApiConfigured(context);
+    const input = listTestCasesSchema.parse(args || {});
+
+    const response = await client.listTestCases(input.workflowId, input.runId, {
+      limit: input.limit || 20,
+      cursor: input.cursor,
+    });
+
+    return {
+      success: true,
+      data: {
+        testCases: response.data,
+        returned: response.data.length,
+        nextCursor: response.nextCursor,
+        hasMore: !!response.nextCursor,
+        ...(response.nextCursor ? {
+          _note: 'More test cases available. Paginate rather than raising limit - per-case inputs/outputs can be large.'
+        } : {})
+      }
+    };
+  } catch (error) {
+    return handleTestRunError(error, context);
   }
 }
 
