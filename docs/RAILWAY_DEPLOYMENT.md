@@ -129,6 +129,7 @@ These are automatically set by the Railway template:
 | Variable | Default Value | Description |
 |----------|--------------|-------------|
 | `N8N_MODE` | `false` | Enable n8n integration mode for MCP Client Tool |
+| `MCP_HTTP_TRANSPORT_MODE` | `stateful` | Use `stateless` for independent request processing without resumability |
 | `N8N_API_URL` | - | URL of your n8n instance (for workflow management) |
 | `N8N_API_KEY` | - | API key from n8n Settings → API |
 

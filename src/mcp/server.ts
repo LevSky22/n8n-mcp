@@ -862,8 +862,9 @@ export class N8NDocumentationMCPServer {
       
       // Check if client is n8n (from initialization)
       const clientInfo = this.clientInfo;
-      const isN8nClient = clientInfo?.name?.includes('n8n') || 
-                         clientInfo?.name?.includes('langchain');
+      const isN8nClient = process.env.N8N_MODE === 'true' ||
+                          clientInfo?.name?.includes('n8n') ||
+                          clientInfo?.name?.includes('langchain');
       
       if (isN8nClient) {
         logger.info('Detected n8n client, using n8n-friendly tool descriptions');

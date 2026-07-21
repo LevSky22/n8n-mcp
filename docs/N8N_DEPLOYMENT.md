@@ -58,6 +58,7 @@ For development or custom testing:
 # Set environment variables
 export N8N_MODE=true
 export MCP_MODE=http                       # Required for HTTP mode
+export MCP_HTTP_TRANSPORT_MODE=stateless  # Optional; stateful remains the default
 export N8N_API_URL=http://localhost:5678  # Your n8n instance URL
 export N8N_API_KEY=your-api-key-here       # Your n8n API key
 export WEBHOOK_SECURITY_MODE=moderate      # Required when N8N_API_URL is localhost or RFC1918
@@ -85,6 +86,7 @@ curl http://localhost:3001/mcp
 |----------|----------|-------------|---------------|
 | `N8N_MODE` | Yes | Enables n8n integration mode | `true` |
 | `MCP_MODE` | Yes | Enables HTTP mode for n8n MCP Client | `http` |
+| `MCP_HTTP_TRANSPORT_MODE` | No | `stateful` retains MCP sessions; `stateless` processes each POST independently | `stateless` |
 | `N8N_API_URL` | Yes* | URL of your n8n instance | `http://localhost:5678` |
 | `N8N_API_KEY` | Yes* | n8n API key for workflow management | `n8n_api_xxx...` |
 | `WEBHOOK_SECURITY_MODE` | No | SSRF gate (`strict` default, `moderate`, `permissive`). Set to `moderate` when `N8N_API_URL` is localhost or an RFC1918 host on the same network. | `moderate` |
@@ -92,6 +94,18 @@ curl http://localhost:3001/mcp
 | `AUTH_TOKEN` | Yes | **MUST match MCP_AUTH_TOKEN exactly** | `secure-random-32-char-token` |
 | `PORT` | No | Port for the HTTP server | `3000` (default) |
 | `LOG_LEVEL` | No | Logging verbosity | `info`, `debug`, `error` |
+
+### Stateless Streamable HTTP
+
+Set `MCP_HTTP_TRANSPORT_MODE=stateless` for API-style clients that do not need
+resumable streams or unsolicited server messages. Every POST is authenticated
+and, in multi-tenant mode, must include the complete tenant header set. The
+server does not issue `Mcp-Session-Id`; stale client-supplied session IDs are
+ignored. `GET /mcp` and `DELETE /mcp` return `405` in this mode, while the
+legacy `/sse` endpoint remains available for explicitly stateful clients.
+
+`N8N_MODE` controls protocol and tool-description compatibility and is
+independent of the transport lifecycle. It can be used with either mode.
 
 *Required only for workflow management features. Documentation tools work without these.
 
