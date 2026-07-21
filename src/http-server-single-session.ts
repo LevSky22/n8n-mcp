@@ -47,6 +47,18 @@ interface MultiTenantHeaders {
 const MAX_SESSIONS = Math.max(1, parseInt(process.env.N8N_MCP_MAX_SESSIONS || '100', 10));
 const SESSION_CLEANUP_INTERVAL = 5 * 60 * 1000; // 5 minutes
 
+export type HttpTransportMode = 'stateful' | 'stateless';
+
+export function getHttpTransportMode(value = process.env.MCP_HTTP_TRANSPORT_MODE): HttpTransportMode {
+  const normalized = value?.trim().toLowerCase() || 'stateful';
+  if (normalized !== 'stateful' && normalized !== 'stateless') {
+    throw new Error(
+      `Invalid MCP_HTTP_TRANSPORT_MODE "${value}". Expected "stateful" or "stateless".`
+    );
+  }
+  return normalized;
+}
+
 interface SessionMetrics {
   totalSessions: number;
   activeSessions: number;
@@ -118,15 +130,19 @@ export class SingleSessionHTTPServer {
   private authToken: string | null = null;
   private cleanupTimer: NodeJS.Timeout | null = null;
   private additionalTools?: AdditionalTool[];
+  private readonly transportMode: HttpTransportMode;
 
   constructor(options?: SingleSessionHTTPServerOptions) {
     this.additionalTools = options?.additionalTools;
+    this.transportMode = getHttpTransportMode();
     // Validate environment on construction
     this.validateEnvironment();
     // No longer pre-create session - will be created per initialize request following SDK pattern
     
-    // Start periodic session cleanup
-    this.startSessionCleanup();
+    // Stateless requests never populate the session maps.
+    if (this.transportMode === 'stateful') {
+      this.startSessionCleanup();
+    }
   }
   
   /**
@@ -557,6 +573,11 @@ export class SingleSessionHTTPServer {
           }
         }
 
+        if (this.transportMode === 'stateless') {
+          await this.handleStatelessRequest(req, res, instanceContext, startTime);
+          return;
+        }
+
         const sessionId = req.headers['mcp-session-id'] as string | undefined;
         const isInitialize = req.body ? isInitializeRequest(req.body) : false;
 
@@ -853,6 +874,65 @@ export class SingleSessionHTTPServer {
       }
     });
   }
+
+  /**
+   * Handle one Streamable HTTP request without retaining transport or tenant
+   * state. Authentication and instance-context validation happen in the
+   * shared Express route before this method is called.
+   */
+  private async handleStatelessRequest(
+    req: express.Request,
+    res: express.Response,
+    instanceContext: InstanceContext | undefined,
+    startTime: number
+  ): Promise<void> {
+    const server = new N8NDocumentationMCPServer(instanceContext, undefined, {
+      additionalTools: this.additionalTools,
+    });
+    const transport = new StreamableHTTPServerTransport({
+      sessionIdGenerator: undefined,
+    });
+    let cleanedUp = false;
+
+    const cleanup = async (): Promise<void> => {
+      if (cleanedUp) return;
+      cleanedUp = true;
+      try {
+        await transport.close();
+      } catch (error) {
+        logger.warn('Stateless transport cleanup failed', { error });
+      }
+      try {
+        await server.close();
+      } catch (error) {
+        logger.warn('Stateless server cleanup failed', { error });
+      }
+    };
+
+    if (typeof res.once === 'function') {
+      res.once('finish', () => { void cleanup(); });
+      res.once('close', () => { void cleanup(); });
+    }
+
+    try {
+      logger.info('handleRequest: Creating request-scoped stateless transport', {
+        requestId: req.get('x-request-id') || 'unknown',
+        method: req.body?.method,
+        instanceId: instanceContext?.instanceId,
+        ignoredSessionId: Boolean(req.headers['mcp-session-id']),
+      });
+      await server.connect(transport);
+      await transport.handleRequest(req, res, req.body);
+      logger.info('Stateless MCP request completed', {
+        duration: Date.now() - startTime,
+        method: req.body?.method,
+      });
+    } finally {
+      // Test doubles and non-streaming responses may not emit lifecycle events.
+      // Cleanup is idempotent, so it is safe to call here as well.
+      await cleanup();
+    }
+  }
   
 
   /**
@@ -1055,6 +1135,15 @@ export class SingleSessionHTTPServer {
     app.get('/mcp', authLimiter, async (req, res) => {
       if (!this.authenticateRequest(req, res)) return;
 
+      if (this.transportMode === 'stateless') {
+        res.status(405).json({
+          jsonrpc: '2.0',
+          error: { code: -32000, message: 'Method not allowed in stateless mode' },
+          id: null
+        });
+        return;
+      }
+
       // Handle StreamableHTTP transport requests with new pattern
       const sessionId = req.headers['mcp-session-id'] as string | undefined;
       const existingTransport = sessionId ? this.transports[sessionId] : undefined;
@@ -1228,6 +1317,15 @@ export class SingleSessionHTTPServer {
     // unauthenticated client can terminate arbitrary MCP sessions (GHSA-75hx-xj24-mqrw).
     app.delete('/mcp', authLimiter, async (req: express.Request, res: express.Response): Promise<void> => {
       if (!this.authenticateRequest(req, res)) return;
+
+      if (this.transportMode === 'stateless') {
+        res.status(405).json({
+          jsonrpc: '2.0',
+          error: { code: -32000, message: 'Method not allowed in stateless mode' },
+          id: null
+        });
+        return;
+      }
 
       const mcpSessionId = req.headers['mcp-session-id'] as string;
       
@@ -1454,6 +1552,7 @@ export class SingleSessionHTTPServer {
       logger.info(`n8n MCP Single-Session HTTP Server started`, { 
         port, 
         host, 
+        transportMode: this.transportMode,
         environment: process.env.NODE_ENV || 'development',
         maxSessions: MAX_SESSIONS,
         sessionTimeout: this.sessionTimeout / 1000 / 60,
@@ -1467,7 +1566,10 @@ export class SingleSessionHTTPServer {
       
       console.log(`n8n MCP Single-Session HTTP Server running on ${host}:${port}`);
       console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
-      console.log(`Session Limits: ${MAX_SESSIONS} max sessions, ${this.sessionTimeout / 1000 / 60}min timeout`);
+      console.log(`Transport lifecycle: ${this.transportMode}`);
+      if (this.transportMode === 'stateful') {
+        console.log(`Session Limits: ${MAX_SESSIONS} max sessions, ${this.sessionTimeout / 1000 / 60}min timeout`);
+      }
       console.log(`Health check: ${endpoints.health}`);
       console.log(`MCP endpoint: ${endpoints.mcp}`);
       console.log(`SSE endpoint: ${baseUrl}/sse (legacy clients)`);

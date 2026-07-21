@@ -27,8 +27,8 @@ vi.mock('@modelcontextprotocol/sdk/server/streamableHttp.js', () => ({
     const mockTransport = {
       handleRequest: vi.fn().mockImplementation(async (req: any, res: any, body?: any) => {
         // For initialize requests, set the session ID header
-        if (body && body.method === 'initialize') {
-          res.setHeader('Mcp-Session-Id', mockTransport.sessionId || 'test-session-id');
+        if (body && body.method === 'initialize' && mockTransport.sessionId) {
+          res.setHeader('Mcp-Session-Id', mockTransport.sessionId);
         }
         res.status(200).json({
           jsonrpc: '2.0',
@@ -262,6 +262,66 @@ describe('HTTP Server Session Management', () => {
   }
 
   describe('Session Creation and Limits', () => {
+    it('should process independent stateless requests without retaining sessions', async () => {
+      process.env.MCP_HTTP_TRANSPORT_MODE = 'stateless';
+      server = new SingleSessionHTTPServer();
+      expect((server as any).cleanupTimer).toBeNull();
+
+      const initialize = createMockReqRes();
+      initialize.req.method = 'POST';
+      initialize.req.body = {
+        jsonrpc: '2.0',
+        method: 'initialize',
+        params: {},
+        id: 1
+      };
+
+      await server.handleRequest(initialize.req as any, initialize.res as any);
+
+      expect(initialize.res.status).toHaveBeenCalledWith(200);
+      expect(initialize.res.getHeader('mcp-session-id')).toBeUndefined();
+      expect(server.getSessionInfo().sessions?.total).toBe(0);
+
+      const ping = createMockReqRes();
+      ping.req.method = 'POST';
+      ping.req.headers['mcp-session-id'] = 'stale-session-from-client';
+      ping.req.body = {
+        jsonrpc: '2.0',
+        method: 'ping',
+        params: {},
+        id: 2
+      };
+
+      await server.handleRequest(ping.req as any, ping.res as any);
+
+      expect(ping.res.status).toHaveBeenCalledWith(200);
+      expect(server.getSessionInfo().sessions?.total).toBe(0);
+    });
+
+    it('should reject an invalid HTTP transport mode', () => {
+      process.env.MCP_HTTP_TRANSPORT_MODE = 'invalid';
+      expect(() => new SingleSessionHTTPServer()).toThrow(
+        'Invalid MCP_HTTP_TRANSPORT_MODE'
+      );
+    });
+
+    it('should reject GET and DELETE on /mcp in stateless mode', async () => {
+      process.env.MCP_HTTP_TRANSPORT_MODE = 'stateless';
+      server = new SingleSessionHTTPServer();
+      await server.start();
+
+      for (const method of ['get', 'delete'] as const) {
+        const handler = findHandler(method, '/mcp');
+        const { req, res } = createMockReqRes();
+        req.headers.authorization = `Bearer ${TEST_AUTH_TOKEN}`;
+        req.method = method.toUpperCase();
+
+        await handler(req, res);
+
+        expect(res.status).toHaveBeenCalledWith(405);
+      }
+    });
+
     it('should allow creation of sessions up to MAX_SESSIONS limit', async () => {
       server = new SingleSessionHTTPServer();
       await server.start();
