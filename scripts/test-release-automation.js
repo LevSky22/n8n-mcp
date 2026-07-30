@@ -282,7 +282,13 @@ class ReleaseAutomationTester {
         success(`Runtime dependencies: ${depCount} packages`);
         
         // List key dependencies
-        const keyDeps = ['@modelcontextprotocol/sdk', 'express', 'sql.js'];
+        const keyDeps = [
+          '@modelcontextprotocol/server',
+          '@modelcontextprotocol/node',
+          '@modelcontextprotocol/sdk',
+          'express',
+          'sql.js',
+        ];
         for (const dep of keyDeps) {
           if (runtimeJson.dependencies[dep]) {
             success(`Key dependency: ${dep} (${runtimeJson.dependencies[dep]})`);

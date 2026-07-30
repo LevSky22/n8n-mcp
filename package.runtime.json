@@ -4,7 +4,10 @@
   "description": "n8n MCP Server Runtime Dependencies Only",
   "private": true,
   "dependencies": {
+    "@modelcontextprotocol/node": "^2.0.0",
     "@modelcontextprotocol/sdk": "1.28.0",
+    "@modelcontextprotocol/server": "^2.0.0",
+    "@modelcontextprotocol/server-legacy": "^2.0.0",
     "@supabase/supabase-js": "^2.57.4",
     "express": "^5.1.0",
     "express-rate-limit": "^7.1.5",
@@ -15,10 +18,11 @@
     "sql.js": "^1.13.0",
     "tslib": "^2.6.2",
     "uuid": "^11.1.1",
-    "axios": "^1.7.7"
+    "axios": "^1.7.7",
+    "zod": "3.25.67"
   },
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=20.0.0"
   },
   "optionalDependencies": {
     "better-sqlite3": "^11.10.0"

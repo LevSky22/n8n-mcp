@@ -5,8 +5,8 @@
  * Tests both get_node_source_code and list_available_nodes tools
  */
 
-const { Server } = require('@modelcontextprotocol/sdk/server/index.js');
-const { StdioServerTransport } = require('@modelcontextprotocol/sdk/server/stdio.js');
+const { Server } = require('@modelcontextprotocol/server');
+const { StdioServerTransport } = require('@modelcontextprotocol/server/stdio');
 const { N8NMCPServer } = require('../dist/mcp/server');
 
 // Test configuration

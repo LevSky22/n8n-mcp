@@ -25,7 +25,7 @@ fi
 
 # Check runtime dependencies
 echo -e "\n🎯 Runtime-only dependencies:"
-RUNTIME_DEPS="@modelcontextprotocol/sdk better-sqlite3 sql.js express dotenv"
+RUNTIME_DEPS="@modelcontextprotocol/sdk @modelcontextprotocol/server @modelcontextprotocol/node better-sqlite3 sql.js express dotenv"
 RUNTIME_SIZE=0
 for dep in $RUNTIME_DEPS; do
     if [ -d "node_modules/$dep" ]; then

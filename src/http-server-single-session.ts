@@ -6,8 +6,9 @@
  */
 import express from 'express';
 import rateLimit from 'express-rate-limit';
-import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
-import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
+import { createMcpHandler, isInitializeRequest } from '@modelcontextprotocol/server';
+import { SSEServerTransport } from '@modelcontextprotocol/server-legacy/sse';
+import { NodeStreamableHTTPServerTransport, toNodeHandler } from '@modelcontextprotocol/node';
 import { N8NDocumentationMCPServer } from './mcp/server';
 import { ConsoleManager } from './utils/console-manager';
 import { logger } from './utils/logger';
@@ -19,7 +20,6 @@ import { getStartupBaseUrl, formatEndpointUrls, detectBaseUrl } from './utils/ur
 import { PROJECT_VERSION } from './utils/version';
 import { v4 as uuidv4 } from 'uuid';
 import { createHash } from 'crypto';
-import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import {
   negotiateProtocolVersion,
   logProtocolNegotiation,
@@ -57,6 +57,39 @@ export function getHttpTransportMode(value = process.env.MCP_HTTP_TRANSPORT_MODE
     );
   }
   return normalized;
+}
+
+/**
+ * Build the SDK v2 per-request HTTP entry used by stateless deployments.
+ * The returned handler negotiates both initialize-era MCP and MCP 2026-07-28
+ * while constructing an isolated server with the caller's tenant context for
+ * every request.
+ */
+export function createDualEraStatelessMcpHandler(
+  instanceContext?: InstanceContext,
+  additionalTools: AdditionalTool[] = []
+) {
+  const requestServers = new Set<N8NDocumentationMCPServer>();
+  const handler = createMcpHandler(() => {
+    const server = new N8NDocumentationMCPServer(instanceContext, undefined, {
+      additionalTools,
+    });
+    requestServers.add(server);
+    return server.getProtocolServer();
+  }, {
+    legacy: 'stateless',
+    onerror: (error) => logger.error('Stateless MCP handler error', { error }),
+  });
+
+  return {
+    handler,
+    close: async (): Promise<void> => {
+      await handler.close();
+      await Promise.allSettled(
+        [...requestServers].map(async (server) => server.close())
+      );
+    },
+  };
 }
 
 interface SessionMetrics {
@@ -115,7 +148,7 @@ export class SingleSessionHTTPServer {
   // or `constructor` would both pass truthiness checks and write to
   // Object.prototype when we assign properties to the looked-up value.
   // Addresses CodeQL js/prototype-polluting-assignment at lines 309 and 399.
-  private transports: { [sessionId: string]: StreamableHTTPServerTransport | SSEServerTransport } = Object.create(null);
+  private transports: { [sessionId: string]: NodeStreamableHTTPServerTransport | SSEServerTransport } = Object.create(null);
   private servers: { [sessionId: string]: N8NDocumentationMCPServer } = Object.create(null);
   private sessionMetadata: { [sessionId: string]: { lastAccess: Date; createdAt: Date } } = Object.create(null);
   private sessionContexts: { [sessionId: string]: InstanceContext | undefined } = Object.create(null);
@@ -592,7 +625,7 @@ export class SingleSessionHTTPServer {
           isInitializeRequest: isInitialize
         });
         
-        let transport: StreamableHTTPServerTransport;
+        let transport: NodeStreamableHTTPServerTransport;
         
         if (isInitialize) {
           // Check session limits before creating new session
@@ -683,7 +716,7 @@ export class SingleSessionHTTPServer {
             additionalTools: this.additionalTools,
           });
 
-          transport = new StreamableHTTPServerTransport({
+          transport = new NodeStreamableHTTPServerTransport({
             sessionIdGenerator: () => sessionIdToUse,
             onsessioninitialized: (initializedSessionId: string) => {
               // Store both transport and server by session ID when session is initialized
@@ -758,7 +791,7 @@ export class SingleSessionHTTPServer {
             return;
           }
 
-          transport = this.transports[sessionId] as StreamableHTTPServerTransport;
+          transport = this.transports[sessionId] as NodeStreamableHTTPServerTransport;
 
           // TOCTOU guard: session may have been removed between the check above and here
           if (!transport) {
@@ -886,51 +919,28 @@ export class SingleSessionHTTPServer {
     instanceContext: InstanceContext | undefined,
     startTime: number
   ): Promise<void> {
-    const server = new N8NDocumentationMCPServer(instanceContext, undefined, {
-      additionalTools: this.additionalTools,
+    const dualEraHandler = createDualEraStatelessMcpHandler(
+      instanceContext,
+      this.additionalTools
+    );
+    const nodeHandler = toNodeHandler(dualEraHandler.handler, {
+      onerror: (error) => logger.error('Stateless MCP Node adapter error', { error }),
     });
-    const transport = new StreamableHTTPServerTransport({
-      sessionIdGenerator: undefined,
-    });
-    let cleanedUp = false;
-
-    const cleanup = async (): Promise<void> => {
-      if (cleanedUp) return;
-      cleanedUp = true;
-      try {
-        await transport.close();
-      } catch (error) {
-        logger.warn('Stateless transport cleanup failed', { error });
-      }
-      try {
-        await server.close();
-      } catch (error) {
-        logger.warn('Stateless server cleanup failed', { error });
-      }
-    };
-
-    if (typeof res.once === 'function') {
-      res.once('finish', () => { void cleanup(); });
-      res.once('close', () => { void cleanup(); });
-    }
 
     try {
-      logger.info('handleRequest: Creating request-scoped stateless transport', {
+      logger.info('handleRequest: Creating dual-era request-scoped MCP handler', {
         requestId: req.get('x-request-id') || 'unknown',
         method: req.body?.method,
         instanceId: instanceContext?.instanceId,
         ignoredSessionId: Boolean(req.headers['mcp-session-id']),
       });
-      await server.connect(transport);
-      await transport.handleRequest(req, res, req.body);
+      await nodeHandler(req, res, req.body);
       logger.info('Stateless MCP request completed', {
         duration: Date.now() - startTime,
         method: req.body?.method,
       });
     } finally {
-      // Test doubles and non-streaming responses may not emit lifecycle events.
-      // Cleanup is idempotent, so it is safe to call here as well.
-      await cleanup();
+      await dualEraHandler.close();
     }
   }
   
@@ -1025,8 +1035,14 @@ export class SingleSessionHTTPServer {
       const allowedOrigin = process.env.CORS_ORIGIN || '*';
       res.setHeader('Access-Control-Allow-Origin', allowedOrigin);
       res.setHeader('Access-Control-Allow-Methods', 'POST, GET, DELETE, OPTIONS');
-      res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, Accept, Mcp-Session-Id');
-      res.setHeader('Access-Control-Expose-Headers', 'Mcp-Session-Id');
+      res.setHeader(
+        'Access-Control-Allow-Headers',
+        'Content-Type, Authorization, Accept, Mcp-Session-Id, MCP-Protocol-Version, Mcp-Method, Mcp-Name'
+      );
+      res.setHeader(
+        'Access-Control-Expose-Headers',
+        'Mcp-Session-Id, MCP-Protocol-Version, Mcp-Method, Mcp-Name'
+      );
       res.setHeader('Access-Control-Max-Age', '86400');
       
       if (req.method === 'OPTIONS') {
@@ -1147,7 +1163,7 @@ export class SingleSessionHTTPServer {
       // Handle StreamableHTTP transport requests with new pattern
       const sessionId = req.headers['mcp-session-id'] as string | undefined;
       const existingTransport = sessionId ? this.transports[sessionId] : undefined;
-      if (existingTransport && existingTransport instanceof StreamableHTTPServerTransport) {
+      if (existingTransport && existingTransport instanceof NodeStreamableHTTPServerTransport) {
         // Let the StreamableHTTPServerTransport handle the GET request
         try {
           await existingTransport.handleRequest(req, res, undefined);

@@ -1,6 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { InMemoryTransport, Client } from '@modelcontextprotocol/client';
 import { TestableN8NMCPServer } from './test-helpers';
 
 describe('MCP Performance Tests', () => {
@@ -209,15 +208,19 @@ describe('MCP Performance Tests', () => {
       if (response.content && Array.isArray(response.content) && response.content[0]) {
         // MCP standard response format
         expect(response.content[0].type).toBe('text');
-        expect(response.content[0].text).toBeDefined();
+        const firstContent = response.content[0];
+        if (firstContent.type !== 'text') {
+          throw new Error(`Expected text content, received ${firstContent.type}`);
+        }
+        expect(firstContent.text).toBeDefined();
 
         try {
-          const parsed = JSON.parse(response.content[0].text);
+          const parsed = JSON.parse(firstContent.text);
           // search_nodes returns an object with results property
           results = parsed.results || parsed;
         } catch (e) {
           console.error('Failed to parse JSON:', e);
-          console.error('Response text was:', response.content[0].text);
+          console.error('Response text was:', firstContent.text);
           throw e;
         }
       } else if (Array.isArray(response)) {

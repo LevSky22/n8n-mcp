@@ -1,6 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { InMemoryTransport, Client } from '@modelcontextprotocol/client';
 import { TestableN8NMCPServer } from './test-helpers';
 
 describe('MCP Protocol Compliance', () => {

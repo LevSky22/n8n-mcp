@@ -35,7 +35,7 @@ export type {
   Tool,
   CallToolResult,
   ListToolsResult
-} from '@modelcontextprotocol/sdk/types.js';
+} from '@modelcontextprotocol/server';
 
 // Default export for convenience
 import N8NMCPEngine from './mcp-engine';

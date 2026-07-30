@@ -1,11 +1,4 @@
-import { Server } from '@modelcontextprotocol/sdk/server/index.js';
-import { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
-import {
-  CallToolRequestSchema,
-  ListToolsRequestSchema,
-  InitializeRequestSchema,
-} from '@modelcontextprotocol/sdk/types.js';
-import { McpError, ErrorCode } from '@modelcontextprotocol/sdk/types.js';
+import { Server, Transport, ProtocolError, ProtocolErrorCode } from '@modelcontextprotocol/server';
 import { N8NDocumentationMCPServer } from '../../../src/mcp/server';
 
 let sharedMcpServer: N8NDocumentationMCPServer | null = null;
@@ -49,7 +42,7 @@ export class TestableN8NMCPServer {
 
   private setupHandlers(server: Server) {
     // Initialize handler
-    server.setRequestHandler(InitializeRequestSchema, async () => {
+    server.setRequestHandler('initialize', async () => {
       return {
         protocolVersion: '2024-11-05',
         capabilities: {
@@ -63,7 +56,7 @@ export class TestableN8NMCPServer {
     });
 
     // List tools handler
-    server.setRequestHandler(ListToolsRequestSchema, async () => {
+    server.setRequestHandler('tools/list', async () => {
       // Import the tools directly from the tools module
       const { n8nDocumentationToolsFinal } = await import('../../../src/mcp/tools');
       const { n8nManagementTools } = await import('../../../src/mcp/tools-n8n-manager');
@@ -79,7 +72,7 @@ export class TestableN8NMCPServer {
     });
 
     // Call tool handler
-    server.setRequestHandler(CallToolRequestSchema, async (request) => {
+    server.setRequestHandler('tools/call', async (request) => {
       try {
         // The mcpServer.executeTool returns raw data, we need to wrap it in the MCP response format
         const result = await this.mcpServer.executeTool(request.params.name, request.params.arguments || {});
@@ -98,8 +91,8 @@ export class TestableN8NMCPServer {
           throw error;
         }
         // Otherwise, wrap it in an MCP error
-        throw new McpError(
-          ErrorCode.InternalError,
+        throw new ProtocolError(
+          ProtocolErrorCode.InternalError,
           error.message || 'Unknown error'
         );
       }

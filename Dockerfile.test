@@ -11,7 +11,9 @@ COPY docker/docker-entrypoint.sh /usr/local/bin/
 COPY .env.example ./
 
 # Install only runtime dependencies
-RUN npm install --production @modelcontextprotocol/sdk better-sqlite3 express dotenv
+RUN npm install --production @modelcontextprotocol/sdk @modelcontextprotocol/node \
+    @modelcontextprotocol/server @modelcontextprotocol/server-legacy \
+    better-sqlite3 express dotenv
 
 # Make entrypoint executable
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh

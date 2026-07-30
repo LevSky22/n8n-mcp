@@ -32,8 +32,8 @@ vi.mock('../../../src/mcp/server', () => ({
 
 // Transport mock: if the gate allows the request through, respond 200.
 // Tests use this as the "gate passed, transport reached" signal.
-vi.mock('@modelcontextprotocol/sdk/server/streamableHttp.js', () => ({
-  StreamableHTTPServerTransport: vi.fn().mockImplementation(() => ({
+vi.mock('@modelcontextprotocol/node', () => ({
+  NodeStreamableHTTPServerTransport: vi.fn().mockImplementation(() => ({
     handleRequest: vi.fn().mockImplementation(async (_req: any, res: any) => {
       if (!res.headersSent) {
         res.status(200).json({ jsonrpc: '2.0', result: { success: true }, id: 1 });

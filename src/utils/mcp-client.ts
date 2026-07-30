@@ -1,19 +1,22 @@
+// The embedded n8n community node still offers the SDK v1 WebSocket transport,
+// which was intentionally removed from SDK v2. Keep this outgoing client on
+// the isolated v1 wire boundary while the MCP server itself uses SDK v2.
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { WebSocketClientTransport } from '@modelcontextprotocol/sdk/client/websocket.js';
 import {
   CallToolRequest,
-  ListToolsRequest,
-  ListResourcesRequest,
-  ReadResourceRequest,
-  ListPromptsRequest,
-  GetPromptRequest,
   CallToolResultSchema,
-  ListToolsResultSchema,
-  ListResourcesResultSchema,
-  ReadResourceResultSchema,
-  ListPromptsResultSchema,
+  GetPromptRequest,
   GetPromptResultSchema,
+  ListPromptsRequest,
+  ListPromptsResultSchema,
+  ListResourcesRequest,
+  ListResourcesResultSchema,
+  ListToolsRequest,
+  ListToolsResultSchema,
+  ReadResourceRequest,
+  ReadResourceResultSchema,
 } from '@modelcontextprotocol/sdk/types.js';
 
 export interface MCPClientConfig {

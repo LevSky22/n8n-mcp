@@ -27,7 +27,18 @@ class TestableN8NMCPServer extends N8NDocumentationMCPServer {
     if (!handler) {
       throw new Error('tools/call handler not registered');
     }
-    return handler({ method: 'tools/call', params: { name, arguments: args } }, {});
+    return handler(
+      { method: 'tools/call', params: { name, arguments: args } },
+      {
+        mcpReq: {
+          id: 1,
+          method: 'tools/call',
+          requestState: () => undefined,
+          signal: new AbortController().signal,
+          send: vi.fn(),
+        },
+      }
+    );
   }
 }
 

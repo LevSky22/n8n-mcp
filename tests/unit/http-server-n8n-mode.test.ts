@@ -20,8 +20,8 @@ vi.mock('../../src/mcp/server', () => ({
   }))
 }));
 
-vi.mock('@modelcontextprotocol/sdk/server/streamableHttp.js', () => ({
-  StreamableHTTPServerTransport: vi.fn().mockImplementation(() => ({
+vi.mock('@modelcontextprotocol/node', () => ({
+  NodeStreamableHTTPServerTransport: vi.fn().mockImplementation(() => ({
     handleRequest: vi.fn().mockImplementation(async (req: any, res: any) => {
       // Simulate successful MCP response
       if (process.env.N8N_MODE === 'true') {

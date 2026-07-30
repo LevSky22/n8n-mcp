@@ -22,8 +22,15 @@ vi.mock('uuid', () => ({
 // Mock transport with session cleanup
 const mockTransports: { [key: string]: any } = {};
 
-vi.mock('@modelcontextprotocol/sdk/server/streamableHttp.js', () => ({
-  StreamableHTTPServerTransport: vi.fn().mockImplementation((options: any) => {
+vi.mock('@modelcontextprotocol/node', () => ({
+  toNodeHandler: vi.fn(() => async (_req: any, res: any, body?: any) => {
+    res.status(200).json({
+      jsonrpc: '2.0',
+      result: { success: true },
+      id: body?.id || 1,
+    });
+  }),
+  NodeStreamableHTTPServerTransport: vi.fn().mockImplementation((options: any) => {
     const mockTransport = {
       handleRequest: vi.fn().mockImplementation(async (req: any, res: any, body?: any) => {
         // For initialize requests, set the session ID header
@@ -59,7 +66,7 @@ vi.mock('@modelcontextprotocol/sdk/server/streamableHttp.js', () => ({
   })
 }));
 
-vi.mock('@modelcontextprotocol/sdk/server/sse.js', () => {
+vi.mock('@modelcontextprotocol/server-legacy/sse', () => {
   class MockSSEServerTransport {
     sessionId: string;
     onclose: (() => void) | null = null;
@@ -80,7 +87,9 @@ vi.mock('@modelcontextprotocol/sdk/server/sse.js', () => {
 
 vi.mock('../../src/mcp/server', () => ({
   N8NDocumentationMCPServer: vi.fn().mockImplementation(() => ({
-    connect: vi.fn().mockResolvedValue(undefined)
+    connect: vi.fn().mockResolvedValue(undefined),
+    close: vi.fn().mockResolvedValue(undefined),
+    getProtocolServer: vi.fn().mockReturnValue({}),
   }))
 }));
 
@@ -109,7 +118,14 @@ vi.mock('../../src/utils/version', () => ({
 }));
 
 // Mock isInitializeRequest
-vi.mock('@modelcontextprotocol/sdk/types.js', () => ({
+vi.mock('@modelcontextprotocol/server', () => ({
+  createMcpHandler: vi.fn((factory: () => unknown) => {
+    factory();
+    return {
+      fetch: vi.fn(),
+      close: vi.fn().mockResolvedValue(undefined),
+    };
+  }),
   isInitializeRequest: vi.fn((request: any) => {
     return request && request.method === 'initialize';
   })

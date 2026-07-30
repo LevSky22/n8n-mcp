@@ -18,7 +18,9 @@ cat > $DEMO_DIR/package.json << 'EOF'
   "private": true,
   "main": "dist/mcp/index.js",
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.12.1",
+    "@modelcontextprotocol/sdk": "1.28.0",
+    "@modelcontextprotocol/server": "^2.0.0",
+    "@modelcontextprotocol/node": "^2.0.0",
     "better-sqlite3": "^11.10.0",
     "sql.js": "^1.13.0",
     "express": "^5.1.0",

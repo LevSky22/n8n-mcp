@@ -19,8 +19,8 @@ vi.mock('uuid', () => ({
 
 const mockTransports: { [key: string]: any } = {};
 
-vi.mock('@modelcontextprotocol/sdk/server/streamableHttp.js', () => ({
-  StreamableHTTPServerTransport: vi.fn().mockImplementation((options: any) => {
+vi.mock('@modelcontextprotocol/node', () => ({
+  NodeStreamableHTTPServerTransport: vi.fn().mockImplementation((options: any) => {
     const mockTransport = {
       handleRequest: vi.fn().mockImplementation(async (req: any, res: any, body?: any) => {
         if (body && body.method === 'initialize') {
@@ -45,7 +45,7 @@ vi.mock('@modelcontextprotocol/sdk/server/streamableHttp.js', () => ({
   }),
 }));
 
-vi.mock('@modelcontextprotocol/sdk/server/sse.js', () => ({
+vi.mock('@modelcontextprotocol/server-legacy/sse', () => ({
   SSEServerTransport: class {
     sessionId = 'sse-test';
     close = vi.fn().mockResolvedValue(undefined);
@@ -74,7 +74,7 @@ vi.mock('../../../src/utils/version', () => ({
   PROJECT_VERSION: '2.47.11',
 }));
 
-vi.mock('@modelcontextprotocol/sdk/types.js', () => ({
+vi.mock('@modelcontextprotocol/server', () => ({
   isInitializeRequest: vi.fn((request: any) => request && request.method === 'initialize'),
 }));
 

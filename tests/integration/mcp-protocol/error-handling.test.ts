@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { InMemoryTransport, Client } from '@modelcontextprotocol/client';
+import { EmptyResultSchema } from '@modelcontextprotocol/core';
 import { TestableN8NMCPServer } from './test-helpers';
 
 describe('MCP Error Handling', () => {
@@ -48,7 +48,7 @@ describe('MCP Error Handling', () => {
         await (client as any).request({
           method: 'nonexistent/method',
           params: {}
-        });
+        }, EmptyResultSchema);
         expect.fail('Should have thrown an error');
       } catch (error: any) {
         expect(error).toBeDefined();

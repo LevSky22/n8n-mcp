@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Dual-era stateless MCP transport.** The HTTP MCP endpoint now uses the split TypeScript SDK v2 server packages and serves both initialize-era clients and MCP 2026-07-28 clients from the same request-scoped handler. Existing stateless tenant isolation is preserved, while modern clients can use the new discovery-based protocol without a separate endpoint. The embedded outgoing MCP client remains on SDK v1 only for its WebSocket transport, which SDK v2 no longer provides.
+
 ## [2.68.1] - 2026-08-04
 
 ### Changed

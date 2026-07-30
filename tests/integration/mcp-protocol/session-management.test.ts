@@ -1,6 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { InMemoryTransport, Client } from '@modelcontextprotocol/client';
 import { TestableN8NMCPServer } from './test-helpers';
 
 describe('MCP Session Management', { timeout: 15000 }, () => {

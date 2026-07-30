@@ -1,14 +1,6 @@
-import { Server } from '@modelcontextprotocol/sdk/server/index.js';
-import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import {
-  CallToolRequestSchema,
-  ListToolsRequestSchema,
-  InitializeRequestSchema,
-  ListResourcesRequestSchema,
-  ListResourceTemplatesRequestSchema,
-  ReadResourceRequestSchema,
-} from '@modelcontextprotocol/sdk/types.js';
-import type { Tool } from '@modelcontextprotocol/sdk/types.js';
+import { StdioServerTransport } from '@modelcontextprotocol/server/stdio';
+import { Server } from '@modelcontextprotocol/server';
+import type { Tool } from '@modelcontextprotocol/server';
 import type { ToolDefinition } from '../types';
 import { existsSync, readFileSync, promises as fs } from 'fs';
 import path from 'path';
@@ -755,7 +747,7 @@ export class N8NDocumentationMCPServer {
 
   private setupHandlers(): void {
     // Handle initialization
-    this.server.setRequestHandler(InitializeRequestSchema, async (request) => {
+    this.server.setRequestHandler('initialize', async (request) => {
       const clientVersion = request.params.protocolVersion;
       const clientCapabilities = request.params.capabilities;
       const clientInfo = request.params.clientInfo;
@@ -806,7 +798,7 @@ export class N8NDocumentationMCPServer {
     });
 
     // Handle tool listing
-    this.server.setRequestHandler(ListToolsRequestSchema, async (request) => {
+    this.server.setRequestHandler('tools/list', async (request) => {
       // Get disabled tools from environment variable
       const disabledTools = this.getDisabledTools();
 
@@ -893,7 +885,7 @@ export class N8NDocumentationMCPServer {
     });
 
     // Handle tool execution
-    this.server.setRequestHandler(CallToolRequestSchema, async (request) => {
+    this.server.setRequestHandler('tools/call', async (request) => {
       const { name, arguments: args } = request.params;
       
       // SECURITY (GHSA-wg4g-395p-mqv3): log metadata only, not raw arg values.
@@ -1158,7 +1150,7 @@ export class N8NDocumentationMCPServer {
     });
 
     // Handle ListResources: UI apps + skill markdown
-    this.server.setRequestHandler(ListResourcesRequestSchema, async () => {
+    this.server.setRequestHandler('resources/list', async () => {
       const apps = UIAppRegistry.getAllApps();
       const skills = SkillResourceRegistry.getAll();
       return {
@@ -1182,12 +1174,12 @@ export class N8NDocumentationMCPServer {
     });
 
     // Advertise URI templates so capable clients can construct skill URIs
-    this.server.setRequestHandler(ListResourceTemplatesRequestSchema, async () => ({
+    this.server.setRequestHandler('resources/templates/list', async () => ({
       resourceTemplates: SkillResourceRegistry.getTemplates(),
     }));
 
     // Handle ReadResource for UI apps and skill markdown
-    this.server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
+    this.server.setRequestHandler('resources/read', async (request) => {
       const uri = request.params.uri;
 
       const uiMatch = uri.match(/^ui:\/\/n8n-mcp\/(.+)$/);
@@ -4190,6 +4182,15 @@ Full documentation is being prepared. For now, use get_node_essentials for confi
   }
 
   // Add connect method to accept any transport
+  /**
+   * Return the low-level SDK server to an official SDK serving entry.
+   * Tool registration remains owned by this wrapper; transports must not
+   * mutate handlers on the returned instance.
+   */
+  getProtocolServer(): Server {
+    return this.server;
+  }
+
   async connect(transport: any): Promise<void> {
     await this.ensureInitialized();
     await this.server.connect(transport);
