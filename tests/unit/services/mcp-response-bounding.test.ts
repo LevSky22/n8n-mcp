@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, unlinkSync, utimesSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import path from 'path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -8,6 +8,8 @@ import {
   HARD_RESULT_BYTES,
   INLINE_RESULT_BYTES,
   boundToolResult,
+  persistResponseArtifact,
+  pruneResponseArtifacts,
   readResponseArtifact,
 } from '../../../src/services/mcp-response-bounding';
 
@@ -21,6 +23,7 @@ describe('MCP response bounding', () => {
 
   afterEach(() => {
     delete process.env.MCP_RESPONSE_ARTIFACT_ROOT;
+    rmSync(root, { recursive: true, force: true });
   });
 
   it('preserves compact results for backward compatibility', () => {
@@ -165,5 +168,108 @@ describe('MCP response bounding', () => {
       firstPage.response_meta.next_cursor,
       'tenant-a',
     )).toThrow('Invalid artifact cursor');
+  });
+
+  it('rejects a cursor that is too short to contain a signature', () => {
+    const artifact = persistResponseArtifact({ value: 'small' }, 'tenant-a');
+    expect(() => readResponseArtifact(artifact.id, 'short', 'tenant-a')).toThrow(
+      'Invalid artifact cursor',
+    );
+  });
+
+  it('uses the default temporary artifact root when no override is configured', () => {
+    delete process.env.MCP_RESPONSE_ARTIFACT_ROOT;
+    const artifact = persistResponseArtifact({ value: 'default-root' }, 'tenant-a');
+    const defaultRoot = '/tmp/n8n-mcp-artifacts';
+    const dataPath = path.join(defaultRoot, `response-${artifact.id}.json`);
+    const metaPath = path.join(defaultRoot, `response-${artifact.id}.meta.json`);
+
+    try {
+      expect(existsSync(dataPath)).toBe(true);
+      expect(existsSync(metaPath)).toBe(true);
+    } finally {
+      rmSync(dataPath, { force: true });
+      rmSync(metaPath, { force: true });
+      process.env.MCP_RESPONSE_ARTIFACT_ROOT = root;
+    }
+  });
+
+  it('returns immediately when pruning a missing artifact root', () => {
+    process.env.MCP_RESPONSE_ARTIFACT_ROOT = path.join(root, 'missing');
+    expect(() => pruneResponseArtifacts()).not.toThrow();
+  });
+
+  it('prunes expired artifact data and tolerates missing metadata', () => {
+    const artifact = persistResponseArtifact({ value: 'expired' }, 'tenant-a');
+    const dataPath = path.join(root, `response-${artifact.id}.json`);
+    const metaPath = path.join(root, `response-${artifact.id}.meta.json`);
+    unlinkSync(metaPath);
+    const old = new Date(Date.now() - (25 * 60 * 60 * 1000));
+    utimesSync(dataPath, old, old);
+
+    pruneResponseArtifacts();
+
+    expect(existsSync(dataPath)).toBe(false);
+    expect(existsSync(metaPath)).toBe(false);
+  });
+
+  it('rejects artifacts above the individual size limit', () => {
+    const value = { text: 'x'.repeat(50 * 1024 * 1024) };
+    expect(() => persistResponseArtifact(value, 'tenant-a')).toThrow('artifact limit');
+  });
+
+  it('uses safe workflow fallbacks when success and nodes are absent', () => {
+    const value = {
+      data: {
+        id: 'workflow-no-nodes',
+        name: 'No nodes',
+        connections: { payload: 'x'.repeat(40_000) },
+      },
+    };
+
+    const bounded = boundToolResult('n8n_get_workflow', value, 'tenant-a') as any;
+    expect(bounded.data).toMatchObject({
+      success: true,
+      data: { id: 'workflow-no-nodes', nodeCount: 0, nodes: [] },
+    });
+  });
+
+  it('reports a short execution page without an upstream cursor as complete', () => {
+    const value = {
+      data: {
+        executions: Array.from({ length: 5 }, (_, index) => ({
+          id: String(index),
+          workflowId: 'workflow-1',
+          status: 'success',
+          data: 'x'.repeat(8_000),
+        })),
+      },
+    };
+
+    const bounded = boundToolResult('n8n_executions', value, 'tenant-a') as any;
+    expect(bounded.data.success).toBe(true);
+    expect(bounded.data.data).toMatchObject({ returned: 5, total_count: 5, hasMore: false });
+  });
+
+  it('compacts oversized summaries until the inline budget is met', () => {
+    const value = {
+      success: true,
+      data: {
+        id: 'workflow-wide-summary',
+        name: 'Wide summary',
+        nodes: Array.from({ length: 100 }, (_, index) => ({
+          id: `node-${index}`,
+          name: `Node ${index} ${'x'.repeat(2_000)}`,
+          type: 'n8n-nodes-base.code',
+          parameters: { jsCode: 'y'.repeat(2_000) },
+        })),
+        connections: {},
+      },
+    };
+
+    const bounded = boundToolResult('n8n_get_workflow', value, 'tenant-a') as any;
+    expect(bounded.response_meta.truncated).toBe(true);
+    expect(Buffer.byteLength(JSON.stringify(bounded))).toBeLessThanOrEqual(INLINE_RESULT_BYTES);
+    expect(bounded.response_meta.artifact).toBeTruthy();
   });
 });
