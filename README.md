@@ -67,6 +67,25 @@ Want to use n8n-MCP with your n8n instance? Check out our comprehensive [n8n Dep
 - Cloud deployment on Hetzner, AWS, and other providers
 - Troubleshooting and security best practices
 
+### Bounded MCP responses
+
+Tool results stay inline up to a conservative 32 KiB budget. Larger workflow,
+execution, documentation, and host-injected tool results return a compact
+summary plus `response_meta.artifact`; use `read_response_artifact` to read the
+complete JSON in 24 KiB pages. The full serialized MCP result is capped at
+128 KiB, artifacts are capped at 50 MiB, expire after 24 hours, and are pruned
+at a 1 GiB quota.
+
+`n8n_executions({action: "list"})` defaults to 20 records. Existing execution
+detail modes and their explicit limits remain compatible; any oversized result
+is moved behind an artifact reference. `n8n_get_workflow` still defaults to
+`full`: small workflows stay inline, while large workflows return their topology
+and an artifact reference. Explicit workflow modes remain backward compatible.
+
+Set `MCP_RESPONSE_ARTIFACT_ROOT` to a persistent, private directory in container
+deployments. Optionally set `MCP_RESPONSE_CURSOR_KEY` to a stable secret so
+artifact cursors survive process restarts.
+
 ### Cloudflare Access Authentication
 
 If your n8n instance sits behind Cloudflare Access (Zero Trust), provide your service token so n8n-MCP can authenticate:
