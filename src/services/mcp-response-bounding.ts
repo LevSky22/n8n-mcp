@@ -268,6 +268,10 @@ export function boundToolResult(toolName: string, value: unknown, owner: string)
     bounded.data = compact(bounded.data, 3);
   }
   bounded.response_meta.serialized_bytes = encode(bounded).length;
+  // The compaction loop targets 32 KiB, so reaching the 128 KiB guard would
+  // violate the invariant above. Keep this as defense in depth without
+  // manufacturing a test-only path that weakens the production limits.
+  /* v8 ignore next */
   if (encode(bounded).length > HARD_RESULT_BYTES) throw new Error('Bounded MCP result exceeded its hard serialized-size limit');
   return bounded;
 }

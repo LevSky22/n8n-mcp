@@ -338,10 +338,14 @@ export class N8NDocumentationMCPServer {
    * same client-bug coercion and schema validation as built-ins.
    */
   private findToolSchema(name: string): { name: string; inputSchema?: any } | undefined {
-    return n8nDocumentationToolsFinal.find(t => t.name === name)
-      ?? n8nManagementTools.find(t => t.name === name)
-      ?? (name === responseArtifactTool.name ? responseArtifactTool : undefined)
-      ?? this.additionalToolsByName.get(name)?.tool;
+    const documentationTool = n8nDocumentationToolsFinal.find(t => t.name === name);
+    if (documentationTool) return documentationTool;
+
+    const managementTool = n8nManagementTools.find(t => t.name === name);
+    if (managementTool) return managementTool;
+
+    if (name === responseArtifactTool.name) return responseArtifactTool;
+    return this.additionalToolsByName.get(name)?.tool;
   }
 
   /**
