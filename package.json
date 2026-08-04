@@ -137,6 +137,8 @@
     "package.runtime.json"
   ],
   "devDependencies": {
+    "@modelcontextprotocol/client": "^2.0.0",
+    "@modelcontextprotocol/core": "^2.0.0",
     "@faker-js/faker": "^9.9.0",
     "@secretlint/secretlint-rule-preset-recommend": "9.3.4",
     "@testing-library/jest-dom": "^6.6.4",
