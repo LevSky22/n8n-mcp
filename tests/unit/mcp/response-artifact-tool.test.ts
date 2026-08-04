@@ -22,6 +22,16 @@ class TestableN8NMCPServer extends N8NDocumentationMCPServer {
     if (!handler) throw new Error('tools/list handler not registered');
     return handler({ method: 'tools/list', params: {} }, {});
   }
+
+  public testFindToolSchema(name: string): any {
+    return (this as any).findToolSchema(name);
+  }
+
+  public async testCallTool(name: string, args: Record<string, unknown>): Promise<any> {
+    const handler = (this as any).server._requestHandlers?.get('tools/call');
+    if (!handler) throw new Error('tools/call handler not registered');
+    return handler({ method: 'tools/call', params: { name, arguments: args } }, {});
+  }
 }
 
 describe('response artifact MCP tool', () => {
@@ -58,11 +68,20 @@ describe('response artifact MCP tool', () => {
     );
   });
 
+  it('resolves the artifact reader schema as a built-in tool', () => {
+    const server = new TestableN8NMCPServer();
+    expect(server.testFindToolSchema('read_response_artifact')).toMatchObject({
+      name: 'read_response_artifact',
+      inputSchema: { required: ['artifactId'] },
+    });
+  });
+
   it('reads artifacts in the default instance scope', async () => {
     const artifact = persistResponseArtifact({ value: 'default' }, 'default-instance');
     const server = new TestableN8NMCPServer();
 
-    const result = await server.testExecuteTool('read_response_artifact', { artifactId: artifact.id });
+    const response = await server.testCallTool('read_response_artifact', { artifactId: artifact.id });
+    const result = JSON.parse(response.content[0].text);
 
     expect(result.artifact_id).toBe(artifact.id);
     expect(JSON.parse(result.text)).toEqual({ value: 'default' });
@@ -77,7 +96,8 @@ describe('response artifact MCP tool', () => {
     const artifact = persistResponseArtifact({ value: 'tenant' }, getInstanceScopeId(context));
     const server = new TestableN8NMCPServer(context);
 
-    const result = await server.testExecuteTool('read_response_artifact', { artifactId: artifact.id });
+    const response = await server.testCallTool('read_response_artifact', { artifactId: artifact.id });
+    const result = JSON.parse(response.content[0].text);
 
     expect(JSON.parse(result.text)).toEqual({ value: 'tenant' });
   });

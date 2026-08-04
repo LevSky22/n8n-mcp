@@ -213,6 +213,19 @@ describe('MCP response bounding', () => {
     expect(existsSync(metaPath)).toBe(false);
   });
 
+  it('prunes expired artifact data together with its metadata sidecar', () => {
+    const artifact = persistResponseArtifact({ value: 'expired-with-metadata' }, 'tenant-a');
+    const dataPath = path.join(root, `response-${artifact.id}.json`);
+    const metaPath = path.join(root, `response-${artifact.id}.meta.json`);
+    const old = new Date(Date.now() - (25 * 60 * 60 * 1000));
+    utimesSync(dataPath, old, old);
+
+    pruneResponseArtifacts();
+
+    expect(existsSync(dataPath)).toBe(false);
+    expect(existsSync(metaPath)).toBe(false);
+  });
+
   it('rejects artifacts above the individual size limit', () => {
     const value = { text: 'x'.repeat(50 * 1024 * 1024) };
     expect(() => persistResponseArtifact(value, 'tenant-a')).toThrow('artifact limit');
@@ -271,5 +284,17 @@ describe('MCP response bounding', () => {
     expect(bounded.response_meta.truncated).toBe(true);
     expect(Buffer.byteLength(JSON.stringify(bounded))).toBeLessThanOrEqual(INLINE_RESULT_BYTES);
     expect(bounded.response_meta.artifact).toBeTruthy();
+  });
+
+  it('reports omitted fields when compacting wide objects', () => {
+    const value = {
+      payload: 'x'.repeat(40_000),
+      wide: Object.fromEntries(Array.from({ length: 25 }, (_, index) => [`field_${index}`, index])),
+    };
+
+    const bounded = boundToolResult('additional_large_tool', value, 'tenant-a') as any;
+
+    expect(bounded.data.wide._omitted_fields).toBe(5);
+    expect(Object.keys(bounded.data.wide)).toHaveLength(21);
   });
 });
