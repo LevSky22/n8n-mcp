@@ -82,9 +82,13 @@ is moved behind an artifact reference. `n8n_get_workflow` still defaults to
 `full`: small workflows stay inline, while large workflows return their topology
 and an artifact reference. Explicit workflow modes remain backward compatible.
 
-Set `MCP_RESPONSE_ARTIFACT_ROOT` to a persistent, private directory in container
-deployments. Optionally set `MCP_RESPONSE_CURSOR_KEY` to a stable secret so
-artifact cursors survive process restarts.
+By default, artifacts use the container-local `/tmp/n8n-mcp-artifacts` directory.
+This is usually appropriate for the 24-hour cache: a container restart discards
+outstanding artifact IDs, and callers can repeat the original read. To preserve
+artifacts across restarts, opt in with `MCP_RESPONSE_ARTIFACT_ROOT` pointing to a
+private persistent directory and set `MCP_RESPONSE_CURSOR_KEY` to a stable secret
+so existing page cursors remain valid. Persistence is not required for bounded
+responses or artifact paging.
 
 ### Cloudflare Access Authentication
 
