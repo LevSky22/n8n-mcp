@@ -73,6 +73,15 @@ function decodeCursor(cursor: string): Record<string, any> {
   return JSON.parse(payload.toString('utf8')) as Record<string, any>;
 }
 
+function utf8PageEnd(content: Buffer, offset: number): number {
+  const tentativeEnd = Math.min(offset + ARTIFACT_PAGE_BYTES, content.length);
+  if (tentativeEnd === content.length) return tentativeEnd;
+
+  let end = tentativeEnd;
+  while (end > offset && (content[end] & 0xc0) === 0x80) end -= 1;
+  return end;
+}
+
 function compact(value: unknown, depth = 0): unknown {
   if (depth >= 4) return '[nested value omitted]';
   if (Array.isArray(value)) return value.slice(0, 3).map(item => compact(item, depth + 1));
@@ -213,7 +222,7 @@ export function readResponseArtifact(artifactId: string, cursor: string | undefi
     offset = decoded.offset;
   }
   const content = readFileSync(target.data);
-  const chunk = content.subarray(offset, Math.min(offset + ARTIFACT_PAGE_BYTES, content.length));
+  const chunk = content.subarray(offset, utf8PageEnd(content, offset));
   const nextOffset = offset + chunk.length;
   const nextCursor = nextOffset < content.length
     ? encodeCursor({ artifactId, offset: nextOffset, owner: safeOwner(owner) })
