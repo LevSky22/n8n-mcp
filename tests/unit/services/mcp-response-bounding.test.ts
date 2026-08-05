@@ -10,6 +10,7 @@ import {
   boundToolResult,
   persistResponseArtifact,
   pruneResponseArtifacts,
+  queryResponseArtifact,
   readResponseArtifact,
 } from '../../../src/services/mcp-response-bounding';
 
@@ -50,7 +51,10 @@ describe('MCP response bounding', () => {
 
     const bounded = boundToolResult('n8n_get_workflow', value, 'tenant-a') as any;
     expect(bounded.response_meta.truncated).toBe(true);
+    expect(bounded.response_meta.complete).toBe(false);
+    expect(bounded.response_meta.warning).toContain('INCOMPLETE RESULT');
     expect(bounded.response_meta.artifact.byte_length).toBeGreaterThan(INLINE_RESULT_BYTES);
+    expect(bounded.response_meta.artifact.query_tool).toBe('query_response_artifact');
     expect(bounded.data.data.nodes).toHaveLength(40);
     expect(Buffer.byteLength(JSON.stringify(bounded))).toBeLessThan(HARD_RESULT_BYTES);
     const artifact = readFileSync(
@@ -296,5 +300,250 @@ describe('MCP response bounding', () => {
 
     expect(bounded.data.wide._omitted_fields).toBe(5);
     expect(Object.keys(bounded.data.wide)).toHaveLength(21);
+  });
+
+  it('queries provider-independent nested arrays with filters, projection, and cursors', () => {
+    const artifact = persistResponseArtifact({
+      providerPayload: {
+        records: Array.from({ length: 17 }, (_, index) => ({
+          id: index,
+          name: `Record ${index}`,
+          state: { name: index % 2 ? 'open' : 'closed' },
+          score: index,
+          payload: 'x'.repeat(1000),
+        })),
+      },
+    }, 'tenant-a');
+
+    const first = queryResponseArtifact(
+      artifact.id,
+      '/providerPayload/records',
+      ['id', 'name', '/state/name'],
+      [{ path: '/state/name', op: 'eq', value: 'open' }, { path: '/score', op: 'gte', value: 5 }],
+      3,
+      undefined,
+      'tenant-a',
+    ) as any;
+
+    expect(first.response).toEqual([
+      { id: 5, name: 'Record 5', '/state/name': 'open' },
+      { id: 7, name: 'Record 7', '/state/name': 'open' },
+      { id: 9, name: 'Record 9', '/state/name': 'open' },
+    ]);
+    expect(first.response_meta).toMatchObject({
+      complete: false,
+      returned_count: 3,
+      total_count: 6,
+      remaining_count: 3,
+      truncation_reason: 'page_limit',
+    });
+    expect(first.response_meta.next_cursor).toBeTruthy();
+
+    const second = queryResponseArtifact(
+      artifact.id,
+      '/providerPayload/records',
+      ['id', 'name', '/state/name'],
+      [{ path: '/state/name', op: 'eq', value: 'open' }, { path: '/score', op: 'gte', value: 5 }],
+      3,
+      first.response_meta.next_cursor,
+      'tenant-a',
+    ) as any;
+    expect(second.response.map((item: any) => item.id)).toEqual([11, 13, 15]);
+    expect(second.response_meta).toMatchObject({
+      complete: true,
+      returned_count: 3,
+      total_count: 6,
+      remaining_count: 0,
+      next_cursor: null,
+    });
+  });
+
+  it('keeps optional projected fields null but rejects an entirely missing projection', () => {
+    const artifact = persistResponseArtifact({ rows: [{ id: 1, optional: 'yes' }, { id: 2 }] }, 'tenant-a');
+    const optional = queryResponseArtifact(
+      artifact.id,
+      '/rows',
+      ['id', 'optional'],
+      [{ path: '/optional', op: 'exists', value: false }],
+      20,
+      undefined,
+      'tenant-a',
+    ) as any;
+    expect(optional.response).toEqual([{ id: 2, optional: null }]);
+
+    expect(() => queryResponseArtifact(
+      artifact.id,
+      '/rows',
+      ['unknown'],
+      undefined,
+      20,
+      undefined,
+      'tenant-a',
+    )).toThrow('matched no properties');
+  });
+
+  it('binds structured query cursors to artifact, scope, and exact view', () => {
+    const firstArtifact = persistResponseArtifact({ rows: [1, 2, 3] }, 'tenant-a');
+    const secondArtifact = persistResponseArtifact({ rows: [1, 2, 3] }, 'tenant-a');
+    const first = queryResponseArtifact(
+      firstArtifact.id, '/rows', undefined, undefined, 1, undefined, 'tenant-a',
+    ) as any;
+
+    expect(() => queryResponseArtifact(
+      secondArtifact.id, '/rows', undefined, undefined, 1, first.response_meta.next_cursor, 'tenant-a',
+    )).toThrow('does not match');
+    expect(() => queryResponseArtifact(
+      firstArtifact.id, '/rows', undefined, undefined, 2, first.response_meta.next_cursor, 'tenant-a',
+    )).toThrow('does not match');
+    expect(() => queryResponseArtifact(
+      firstArtifact.id, '/rows', undefined, undefined, 1, undefined, 'tenant-b',
+    )).toThrow('different MCP scope');
+  });
+
+  it('advances past one oversized item with a compact page', () => {
+    const artifact = persistResponseArtifact({
+      rows: [{ id: 1, body: 'x'.repeat(40 * 1024) }, { id: 2 }],
+    }, 'tenant-a');
+    const first = queryResponseArtifact(
+      artifact.id, '/rows', undefined, undefined, 20, undefined, 'tenant-a',
+    ) as any;
+    expect(first.response[0].id).toBe(1);
+    expect(first.response_meta).toMatchObject({
+      returned_count: 1,
+      total_count: 2,
+      remaining_count: 1,
+      truncation_reason: 'item_size_limit',
+    });
+    expect(first.response_meta.next_cursor).toBeTruthy();
+    expect(Buffer.byteLength(JSON.stringify(first))).toBeLessThan(HARD_RESULT_BYTES);
+  });
+
+  it('validates structured query bounds and filter shapes', () => {
+    const artifact = persistResponseArtifact({ rows: [{ id: 1 }] }, 'tenant-a');
+    expect(() => queryResponseArtifact(
+      artifact.id, '/rows', undefined, undefined, 0, undefined, 'tenant-a',
+    )).toThrow('pageSize');
+    expect(() => queryResponseArtifact(
+      artifact.id, '/rows', undefined, Array.from({ length: 11 }, () => ({ path: '/id' })), 20, undefined, 'tenant-a',
+    )).toThrow('at most 10');
+    expect(() => queryResponseArtifact(
+      artifact.id, '/rows', undefined, [{ path: '/id', op: 'in', value: 'invalid' } as any], 20, undefined, 'tenant-a',
+    )).toThrow('must be an array');
+    expect(() => queryResponseArtifact(
+      artifact.id, '/rows', Array.from({ length: 51 }, (_, index) => `field-${index}`), undefined, 20, undefined, 'tenant-a',
+    )).toThrow('at most 50');
+    expect(() => queryResponseArtifact(
+      artifact.id, '/rows', undefined, [{} as any], 20, undefined, 'tenant-a',
+    )).toThrow('each filter');
+    expect(() => queryResponseArtifact(
+      artifact.id, '/rows', undefined, [{ path: '/id', op: 'invalid' as any }], 20, undefined, 'tenant-a',
+    )).toThrow('Unsupported filter operation');
+    expect(() => queryResponseArtifact(
+      artifact.id, '/rows', undefined, [{ path: '/id', op: 'exists', value: 'yes' }], 20, undefined, 'tenant-a',
+    )).toThrow('must be boolean');
+    expect(() => queryResponseArtifact(
+      artifact.id, '/rows', [''], undefined, 20, undefined, 'tenant-a',
+    )).toThrow('non-empty strings');
+  });
+
+  it('supports generic comparison and containment filters', () => {
+    const artifact = persistResponseArtifact({
+      rows: [
+        { id: 1, score: 5, text: 'hello', tags: ['alpha'], metadata: { key: true } },
+        { id: 2, score: 10, text: 'goodbye', tags: ['beta'], metadata: {} },
+      ],
+    }, 'tenant-a');
+    const result = queryResponseArtifact(
+      artifact.id,
+      '/rows',
+      ['id'],
+      [
+        { path: '/id', op: 'ne', value: 2 },
+        { path: '/id', op: 'in', value: [1, 3] },
+        { path: '/score', op: 'gt', value: 4 },
+        { path: '/score', op: 'gte', value: 5 },
+        { path: '/score', op: 'lt', value: 6 },
+        { path: '/score', op: 'lte', value: 5 },
+        { path: '/text', op: 'contains', value: 'ell' },
+        { path: '/tags', op: 'contains', value: 'alpha' },
+        { path: '/metadata', op: 'contains', value: 'key' },
+        { path: '/missing', op: 'exists', value: false },
+      ],
+      20,
+      undefined,
+      'tenant-a',
+    ) as any;
+    expect(result.response).toEqual([{ id: 1 }]);
+  });
+
+  it('validates response paths and object projections', () => {
+    const artifact = persistResponseArtifact({ record: { id: 1, name: 'One' } }, 'tenant-a');
+    const result = queryResponseArtifact(
+      artifact.id, '/record', ['id'], undefined, 20, undefined, 'tenant-a',
+    ) as any;
+    expect(result.response).toEqual({ id: 1 });
+    expect(result.response_meta.complete).toBe(true);
+
+    expect(() => queryResponseArtifact(
+      artifact.id, 'record', undefined, undefined, 20, undefined, 'tenant-a',
+    )).toThrow('RFC 6901');
+    expect(() => queryResponseArtifact(
+      artifact.id, '/missing', undefined, undefined, 20, undefined, 'tenant-a',
+    )).toThrow('does not exist');
+    expect(() => queryResponseArtifact(
+      artifact.id, '/record', ['unknown'], undefined, 20, undefined, 'tenant-a',
+    )).toThrow('matched no properties');
+    expect(() => queryResponseArtifact(
+      artifact.id, '/record', undefined, [{ path: '/id', op: 'eq', value: 1 }], 20, undefined, 'tenant-a',
+    )).toThrow('select a JSON array');
+
+    const scalar = queryResponseArtifact(
+      artifact.id, '/record/id', undefined, undefined, 20, undefined, 'tenant-a',
+    ) as any;
+    expect(scalar.response).toBe(1);
+
+    const arrayArtifact = persistResponseArtifact({ rows: [{ id: 2 }] }, 'tenant-a');
+    const arrayScalar = queryResponseArtifact(
+      arrayArtifact.id, '/rows/0/id', undefined, undefined, 20, undefined, 'tenant-a',
+    ) as any;
+    expect(arrayScalar.response).toBe(2);
+  });
+
+  it('treats contains on an unsupported scalar type as not matched', () => {
+    const artifact = persistResponseArtifact({ rows: [{ id: 1 }] }, 'tenant-a');
+    const result = queryResponseArtifact(
+      artifact.id,
+      '/rows',
+      undefined,
+      [{ path: '/id', op: 'contains', value: 1 }],
+      20,
+      undefined,
+      'tenant-a',
+    ) as any;
+    expect(result.response).toEqual([]);
+  });
+
+  it('bounds a large non-array structured query result', () => {
+    const artifact = persistResponseArtifact({ record: { id: 1, body: 'x'.repeat(40 * 1024) } }, 'tenant-a');
+    const result = queryResponseArtifact(
+      artifact.id, '/record', undefined, undefined, 20, undefined, 'tenant-a',
+    ) as any;
+    expect(result.response.id).toBe(1);
+    expect(result.response.body.endsWith('…')).toBe(true);
+    expect(result.response_meta).toMatchObject({
+      complete: false,
+      truncated: true,
+      truncation_reason: 'size_limit',
+      next_cursor: null,
+    });
+    expect(Buffer.byteLength(JSON.stringify(result))).toBeLessThan(HARD_RESULT_BYTES);
+  });
+
+  it('rejects an artifact whose stored body is no longer valid JSON', () => {
+    const artifact = persistResponseArtifact({ rows: [] }, 'tenant-a');
+    writeFileSync(path.join(root, `response-${artifact.id}.json`), '{invalid');
+    expect(() => queryResponseArtifact(
+      artifact.id, '', undefined, undefined, 20, undefined, 'tenant-a',
+    )).toThrow('valid JSON');
   });
 });

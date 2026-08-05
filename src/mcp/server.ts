@@ -47,7 +47,13 @@ import {
   STANDARD_PROTOCOL_VERSION
 } from '../utils/protocol-version';
 import { InstanceContext, getInstanceScopeId } from '../types/instance-context';
-import { boundToolResult, readResponseArtifact, responseArtifactTool } from '../services/mcp-response-bounding';
+import {
+  boundToolResult,
+  queryResponseArtifact,
+  queryResponseArtifactTool,
+  readResponseArtifact,
+  responseArtifactTool,
+} from '../services/mcp-response-bounding';
 import type { AdditionalTool, AdditionalToolContext } from '../types/additional-tools';
 import { telemetry } from '../telemetry';
 import { EarlyErrorLogger } from '../telemetry/early-error-logger';
@@ -289,6 +295,7 @@ export class N8NDocumentationMCPServer {
       ...n8nDocumentationToolsFinal.map(tool => tool.name),
       ...n8nManagementTools.map(tool => tool.name),
       responseArtifactTool.name,
+      queryResponseArtifactTool.name,
     ]);
 
     for (const additionalTool of additionalTools) {
@@ -330,6 +337,7 @@ export class N8NDocumentationMCPServer {
     if (managementTool) return managementTool;
 
     if (name === responseArtifactTool.name) return responseArtifactTool;
+    if (name === queryResponseArtifactTool.name) return queryResponseArtifactTool;
     return this.additionalToolsByName.get(name)?.tool;
   }
 
@@ -826,6 +834,9 @@ export class N8NDocumentationMCPServer {
       let tools = [...enabledDocTools];
       if (!disabledTools.has(responseArtifactTool.name)) {
         tools.push(responseArtifactTool as ToolDefinition);
+      }
+      if (!disabledTools.has(queryResponseArtifactTool.name)) {
+        tools.push(queryResponseArtifactTool as ToolDefinition);
       }
 
       // Check if n8n API tools should be available
@@ -1633,6 +1644,25 @@ export class N8NDocumentationMCPServer {
       }
       const owner = this.instanceContext ? getInstanceScopeId(this.instanceContext) : 'default-instance';
       return readResponseArtifact(args.artifactId, args.cursor, owner);
+    }
+
+    if (name === queryResponseArtifactTool.name) {
+      if (!args.artifactId || typeof args.artifactId !== 'string') {
+        throw new Error('artifactId is required');
+      }
+      if (typeof args.responsePath !== 'string') {
+        throw new Error('responsePath is required');
+      }
+      const owner = this.instanceContext ? getInstanceScopeId(this.instanceContext) : 'default-instance';
+      return queryResponseArtifact(
+        args.artifactId,
+        args.responsePath,
+        args.fields,
+        args.filters,
+        args.pageSize ?? 20,
+        args.cursor,
+        owner,
+      );
     }
 
     // Defense in depth: This should never be reached since CallToolRequestSchema
