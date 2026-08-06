@@ -4,6 +4,7 @@ import type { Tool } from '@modelcontextprotocol/server';
 import type { ToolDefinition } from '../types';
 import { existsSync, readFileSync, promises as fs } from 'fs';
 import path from 'path';
+import { inspect } from 'util';
 import { n8nDocumentationToolsFinal } from './tools';
 import { UIAppRegistry } from './ui';
 import { SkillResourceRegistry } from './skills';
@@ -45,6 +46,7 @@ import {
   queryResponseArtifactTool,
   readResponseArtifact,
   responseArtifactTool,
+  serializeToolText,
 } from '../services/mcp-response-bounding';
 import type { AdditionalTool, AdditionalToolContext } from '../types/additional-tools';
 import { telemetry } from '../telemetry';
@@ -62,6 +64,30 @@ import { STARTUP_CHECKPOINTS } from '../telemetry/startup-checkpoints';
  */
 function escapeRegExp(input: string): string {
   return input.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * Last-resort serializer for results JSON.stringify refuses (circular references,
+ * BigInt). Produces something a model can actually read instead of "[object Object]".
+ */
+function safeSerialize(value: unknown): string {
+  const seen = new WeakSet<object>();
+  try {
+    return JSON.stringify(
+      value,
+      (_key, inner) => {
+        if (typeof inner === 'bigint') return `${inner.toString()}n`;
+        if (inner && typeof inner === 'object') {
+          if (seen.has(inner as object)) return '[circular reference]';
+          seen.add(inner as object);
+        }
+        return inner;
+      },
+      2,
+    ) ?? String(value);
+  } catch {
+    return inspect(value, { depth: 4, maxArrayLength: 20, maxStringLength: 1000, breakLength: 120 });
+  }
 }
 
 interface NodeRow {
@@ -1054,26 +1080,30 @@ export class N8NDocumentationMCPServer {
 
         if (isAdditionalTool && result === originalResult) {
           // Preserve a host tool's valid compact MCP response shape.
-          return result;
+          return this.ensureTextContent(name, result);
         }
         
         // Ensure the result is properly formatted for MCP
         let responseText: string;
         let structuredContent: any = null;
         
+        let serializationFailed = false;
         try {
           // For validation tools, check if we should use structured content
           if (name.startsWith('validate_') && typeof result === 'object' && result !== null) {
             // Clean up the result to ensure it matches the outputSchema
             const cleanResult = this.sanitizeValidationResult(result, name);
             structuredContent = cleanResult;
-            responseText = JSON.stringify(cleanResult, null, 2);
+            responseText = serializeToolText(cleanResult);
           } else {
-            responseText = typeof result === 'string' ? result : JSON.stringify(result, null, 2);
+            responseText = typeof result === 'string' ? result : serializeToolText(result);
           }
         } catch (jsonError) {
           logger.warn(`Failed to stringify tool result for ${name}:`, jsonError);
-          responseText = String(result);
+          // String(result) on an object yields "[object Object]" — a payload-shaped
+          // non-payload, previously returned without isError.
+          responseText = safeSerialize(result);
+          serializationFailed = true;
         }
         
         // Build MCP response with strict schema compliance
@@ -1089,6 +1119,10 @@ export class N8NDocumentationMCPServer {
         // For tools with outputSchema, structuredContent is REQUIRED by MCP spec
         if (name.startsWith('validate_') && structuredContent !== null) {
           mcpResponse.structuredContent = structuredContent;
+        }
+
+        if (serializationFailed) {
+          mcpResponse.isError = true;
         }
 
         return mcpResponse;
@@ -1227,6 +1261,28 @@ export class N8NDocumentationMCPServer {
 
       throw new Error(`Unknown resource URI: ${uri}`);
     });
+  }
+
+  /**
+   * Guards the host-tool passthrough. A host handler returns its own MCP response
+   * shape, and nothing previously checked that each content block's `text` was a
+   * string — an object there reaches the client as "[object Object]", because that is
+   * what a JS host renders when it stringifies a non-string. Coerce it to readable
+   * JSON instead of trusting the shape.
+   */
+  private ensureTextContent(toolName: string, result: any): any {
+    if (!result || typeof result !== 'object' || !Array.isArray(result.content)) return result;
+    let repaired = false;
+    const content = result.content.map((block: any) => {
+      if (block && block.type === 'text' && typeof block.text !== 'string') {
+        repaired = true;
+        return { ...block, text: safeSerialize(block.text) };
+      }
+      return block;
+    });
+    if (!repaired) return result;
+    logger.warn(`Host tool "${toolName}" returned a non-string text content block; serialized it instead.`);
+    return { ...result, content };
   }
 
   /**
@@ -1655,6 +1711,7 @@ export class N8NDocumentationMCPServer {
         args.pageSize ?? 20,
         args.cursor,
         owner,
+        args.describe === true,
       );
     }
 
