@@ -68,7 +68,7 @@ COPY .env.example ./
 COPY docker/docker-entrypoint.sh /usr/local/bin/
 COPY docker/parse-config.js /app/docker/
 COPY docker/n8n-mcp /usr/local/bin/
-RUN chmod +x /usr/local/bin/docker-entrypoint.sh /usr/local/bin/n8n-mcp
+RUN chmod 0755 /usr/local/bin/docker-entrypoint.sh /usr/local/bin/n8n-mcp
 
 # Add container labels
 LABEL org.opencontainers.image.source="https://github.com/czlonkowski/n8n-mcp"
