@@ -38,7 +38,14 @@ import {
   logProtocolNegotiation,
   STANDARD_PROTOCOL_VERSION
 } from '../utils/protocol-version';
-import { InstanceContext } from '../types/instance-context';
+import { InstanceContext, getInstanceScopeId } from '../types/instance-context';
+import {
+  boundToolResult,
+  queryResponseArtifact,
+  queryResponseArtifactTool,
+  readResponseArtifact,
+  responseArtifactTool,
+} from '../services/mcp-response-bounding';
 import type { AdditionalTool, AdditionalToolContext } from '../types/additional-tools';
 import { telemetry } from '../telemetry';
 import { EarlyErrorLogger } from '../telemetry/early-error-logger';
@@ -279,6 +286,8 @@ export class N8NDocumentationMCPServer {
     const builtInToolNames = new Set([
       ...n8nDocumentationToolsFinal.map(tool => tool.name),
       ...n8nManagementTools.map(tool => tool.name),
+      responseArtifactTool.name,
+      queryResponseArtifactTool.name,
     ]);
 
     for (const additionalTool of additionalTools) {
@@ -313,9 +322,15 @@ export class N8NDocumentationMCPServer {
    * same client-bug coercion and schema validation as built-ins.
    */
   private findToolSchema(name: string): { name: string; inputSchema?: any } | undefined {
-    return n8nDocumentationToolsFinal.find(t => t.name === name)
-      ?? n8nManagementTools.find(t => t.name === name)
-      ?? this.additionalToolsByName.get(name)?.tool;
+    const documentationTool = n8nDocumentationToolsFinal.find(t => t.name === name);
+    if (documentationTool) return documentationTool;
+
+    const managementTool = n8nManagementTools.find(t => t.name === name);
+    if (managementTool) return managementTool;
+
+    if (name === responseArtifactTool.name) return responseArtifactTool;
+    if (name === queryResponseArtifactTool.name) return queryResponseArtifactTool;
+    return this.additionalToolsByName.get(name)?.tool;
   }
 
   /**
@@ -809,6 +824,12 @@ export class N8NDocumentationMCPServer {
 
       // Combine documentation tools with management tools if API is configured
       let tools = [...enabledDocTools];
+      if (!disabledTools.has(responseArtifactTool.name)) {
+        tools.push(responseArtifactTool as ToolDefinition);
+      }
+      if (!disabledTools.has(queryResponseArtifactTool.name)) {
+        tools.push(queryResponseArtifactTool as ToolDefinition);
+      }
 
       // Check if n8n API tools should be available
       // 1. Environment variables (backward compatibility)
@@ -1010,7 +1031,7 @@ export class N8NDocumentationMCPServer {
         // SECURITY (GHSA-wg4g-395p-mqv3): log metadata only, not raw arg values.
         logger.debug(`Executing tool: ${name}`, summarizeToolCallArgs(processedArgs));
         const startTime = Date.now();
-        const result = await this.executeTool(name, processedArgs);
+        let result = await this.executeTool(name, processedArgs);
         const duration = Date.now() - startTime;
         logger.debug(`Tool ${name} executed successfully`);
 
@@ -1027,8 +1048,12 @@ export class N8NDocumentationMCPServer {
         this.previousTool = name;
         this.previousToolTimestamp = Date.now();
 
-        if (isAdditionalTool) {
-          // Host controls the response shape.
+        const owner = this.instanceContext ? getInstanceScopeId(this.instanceContext) : 'default-instance';
+        const originalResult = result;
+        result = boundToolResult(name, result, owner);
+
+        if (isAdditionalTool && result === originalResult) {
+          // Preserve a host tool's valid compact MCP response shape.
           return result;
         }
         
@@ -1049,13 +1074,6 @@ export class N8NDocumentationMCPServer {
         } catch (jsonError) {
           logger.warn(`Failed to stringify tool result for ${name}:`, jsonError);
           responseText = String(result);
-        }
-        
-        // Validate response size (n8n might have limits)
-        if (responseText.length > 1000000) { // 1MB limit
-          logger.warn(`Tool ${name} response is very large (${responseText.length} chars), truncating`);
-          responseText = responseText.substring(0, 999000) + '\n\n[Response truncated due to size limits]';
-          structuredContent = null; // Don't use structured content for truncated responses
         }
         
         // Build MCP response with strict schema compliance
@@ -1612,6 +1630,33 @@ export class N8NDocumentationMCPServer {
   async executeTool(name: string, args: any): Promise<any> {
     // Ensure args is an object and validate it
     args = args || {};
+
+    if (name === responseArtifactTool.name) {
+      if (!args.artifactId || typeof args.artifactId !== 'string') {
+        throw new Error('artifactId is required');
+      }
+      const owner = this.instanceContext ? getInstanceScopeId(this.instanceContext) : 'default-instance';
+      return readResponseArtifact(args.artifactId, args.cursor, owner);
+    }
+
+    if (name === queryResponseArtifactTool.name) {
+      if (!args.artifactId || typeof args.artifactId !== 'string') {
+        throw new Error('artifactId is required');
+      }
+      if (typeof args.responsePath !== 'string') {
+        throw new Error('responsePath is required');
+      }
+      const owner = this.instanceContext ? getInstanceScopeId(this.instanceContext) : 'default-instance';
+      return queryResponseArtifact(
+        args.artifactId,
+        args.responsePath,
+        args.fields,
+        args.filters,
+        args.pageSize ?? 20,
+        args.cursor,
+        owner,
+      );
+    }
 
     // Defense in depth: This should never be reached since CallToolRequestSchema
     // handler already checks disabled tools (line 514-528), but we guard here

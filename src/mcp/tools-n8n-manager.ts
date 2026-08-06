@@ -98,7 +98,7 @@ export const n8nManagementTools: ToolDefinition[] = [
   },
   {
     name: 'n8n_get_workflow',
-    description: `Get workflow by ID with different detail levels. n8n has a draft/publish model: the workflow body holds the draft (latest edits); use mode='active' to see the published graph that is actually running. Modes: 'full' (draft + metadata), 'details' (full + execution stats), 'active' (published graph only), 'structure' (nodes/connections topology), 'filtered' (full config of only the nodes named in nodeNames - use to read one heavy node without the whole workflow), 'minimal' (id/name/active/tags).`,
+    description: `Get workflow by ID with bounded output. With mode omitted, small workflows are returned in full; large workflows return a compact structure plus response_meta.artifact for the full JSON. Explicit modes remain available: 'full', 'details', 'active', 'structure', 'filtered', and 'minimal'.`,
     inputSchema: {
       type: 'object',
       properties: {
@@ -110,7 +110,7 @@ export const n8nManagementTools: ToolDefinition[] = [
           type: 'string',
           enum: ['full', 'details', 'structure', 'minimal', 'active', 'filtered'],
           default: 'full',
-          description: 'Detail level: full=draft + metadata (activeVersionId pointer kept, heavy activeVersion payload stripped), details=full+execution stats, active=published graph (errors if workflow has no live version), structure=nodes/connections topology, filtered=full config of only the nodes listed in nodeNames, minimal=metadata only'
+          description: 'Detail level: full=draft + metadata, details=full+execution stats, active=published graph, structure=topology, filtered=selected nodes, minimal=metadata only. Oversized results return a compact summary plus a pageable artifact.'
         },
         nodeNames: {
           type: 'array',
@@ -127,10 +127,8 @@ export const n8nManagementTools: ToolDefinition[] = [
       idempotentHint: true,
       openWorldHint: true,
     },
-    // Claude Code default per-tool cap is 25k tokens; raise it so large but legitimate
-    // workflows still come back inline rather than being persisted to a disk file the model
-    // cannot read. The protocol ceiling is 500k chars; we leave ~10% headroom for the
-    // MCP/JSON-RPC envelope wrapping our payload. See code.claude.com/docs/en/mcp.
+    // Retained from #786 as defense in depth for Claude hosts. The server-side
+    // response bouncer normally keeps this result far below the host ceiling.
     _meta: {
       'anthropic/maxResultSizeChars': 450000,
     },
@@ -495,7 +493,7 @@ export const n8nManagementTools: ToolDefinition[] = [
         // For action='list'
         limit: {
           type: 'number',
-          description: 'For action=list: number of executions to return (1-100, default: 100)'
+          description: 'For action=list: number of executions to return (1-100, default: 20)'
         },
         cursor: {
           type: 'string',
