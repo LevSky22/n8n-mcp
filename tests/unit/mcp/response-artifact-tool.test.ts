@@ -30,7 +30,14 @@ class TestableN8NMCPServer extends N8NDocumentationMCPServer {
   public async testCallTool(name: string, args: Record<string, unknown>): Promise<any> {
     const handler = (this as any).server._requestHandlers?.get('tools/call');
     if (!handler) throw new Error('tools/call handler not registered');
-    return handler({ method: 'tools/call', params: { name, arguments: args } }, {});
+    // SDK v2 wraps tools/call (and prompts/get, resources/read) in an
+    // input-required-capable handler that reads ctx.mcpReq.requestState()
+    // before invoking the registered handler. Our own handler ignores ctx,
+    // but the SDK wrapper still requires the accessor to exist.
+    return handler(
+      { method: 'tools/call', params: { name, arguments: args } },
+      { mcpReq: { requestState: () => undefined } }
+    );
   }
 }
 
