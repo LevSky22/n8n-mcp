@@ -98,7 +98,7 @@ export const n8nManagementTools: ToolDefinition[] = [
   },
   {
     name: 'n8n_get_workflow',
-    description: `Get workflow by ID with bounded output. With mode omitted, small workflows are returned in full; large workflows return a compact structure plus response_meta.artifact for the full JSON. Explicit modes remain available: 'full', 'details', 'active', 'structure', 'filtered', and 'minimal'.`,
+    description: `Get workflow by ID with bounded output. With mode omitted, small workflows are returned in full; large workflows return a compact structure plus response_meta.artifact for the full JSON. The compact structure is a RESHAPED preview whose nesting differs from the artifact, so query the pointers in response_meta.artifact.primary_paths rather than pointers copied from the preview. Artifact handles are valid until the MCP server restarts, and at most 24 hours; re-run this tool to mint a new one. Explicit modes remain available: 'full', 'details', 'active', 'structure', 'filtered', and 'minimal'.`,
     inputSchema: {
       type: 'object',
       properties: {
@@ -440,7 +440,7 @@ export const n8nManagementTools: ToolDefinition[] = [
   },
   {
     name: 'n8n_executions',
-    description: `Manage workflow executions: get details, list, or delete. Use action='get' with id for execution details, action='list' for listing executions, action='delete' to remove execution record.`,
+    description: `Manage workflow executions: get details, list, or delete. Use action='get' with id for execution details, action='list' for listing executions, action='delete' to remove execution record. Large results return a compact preview plus response_meta.artifact holding the full JSON; the preview is RESHAPED, so query the pointers in response_meta.artifact.primary_paths rather than pointers copied from the preview. Artifact handles are valid until the MCP server restarts, and at most 24 hours; re-run this tool to mint a new one.`,
     inputSchema: {
       type: 'object',
       properties: {
