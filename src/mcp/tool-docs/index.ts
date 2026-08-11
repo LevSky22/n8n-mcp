@@ -8,7 +8,9 @@ import { getTemplateDoc, searchTemplatesDoc } from './templates';
 import {
   toolsDocumentationDoc,
   n8nHealthCheckDoc,
-  n8nAuditInstanceDoc
+  n8nAuditInstanceDoc,
+  queryResponseArtifactDoc,
+  readResponseArtifactDoc
 } from './system';
 import { aiAgentsGuide } from './guides';
 import {
@@ -36,6 +38,11 @@ export const toolsDocumentation: Record<string, ToolDocumentation> = {
   tools_documentation: toolsDocumentationDoc,
   n8n_health_check: n8nHealthCheckDoc,
   n8n_audit_instance: n8nAuditInstanceDoc,
+
+  // Response-bounding wrappers. Registered by src/services/mcp-response-bounding.ts
+  // rather than src/mcp/tools.ts, which is why they were missing here.
+  query_response_artifact: queryResponseArtifactDoc,
+  read_response_artifact: readResponseArtifactDoc,
 
   // Guides
   ai_agents_guide: aiAgentsGuide,
