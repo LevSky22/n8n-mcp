@@ -40,7 +40,10 @@ export class MutationTracker {
         return null;
       }
 
-      // Sanitize workflows to remove credentials and sensitive data
+      // Sanitize workflows to remove credentials and sensitive data. The before
+      // snapshot never leaves this method — it drives deduplication and the
+      // before-hashes, which are computed over the sanitized form so they stay
+      // comparable with previously recorded mutations.
       const workflowBefore = WorkflowSanitizer.sanitizeWorkflowRaw(data.workflowBefore);
       const workflowAfter = WorkflowSanitizer.sanitizeWorkflowRaw(data.workflowAfter);
 
@@ -103,7 +106,6 @@ export class MutationTracker {
       const record: WorkflowMutationRecord = {
         userId,
         sessionId: data.sessionId,
-        workflowBefore,
         workflowAfter,
         workflowHashBefore: hashBefore,
         workflowHashAfter: hashAfter,

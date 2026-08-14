@@ -8,7 +8,7 @@ import { TelemetryConfigManager } from './config-manager';
 import { TelemetryEventTracker } from './event-tracker';
 import { TelemetryBatchProcessor } from './batch-processor';
 import { TelemetryPerformanceMonitor } from './performance-monitor';
-import { TELEMETRY_BACKEND } from './telemetry-types';
+import { TELEMETRY_BACKEND, TELEMETRY_CONFIG } from './telemetry-types';
 import { TelemetryError, TelemetryErrorType, TelemetryErrorAggregator } from './telemetry-error';
 import { telemetryFetch } from './telemetry-fetch';
 import { logger } from '../utils/logger';
@@ -298,6 +298,44 @@ export class TelemetryManager {
       if (duration > 100) {
         logger.debug(`Telemetry flush took ${duration.toFixed(2)}ms`);
       }
+    }
+  }
+
+  /**
+   * Final flush for shutdown paths.
+   *
+   * Every shutdown path ends in process.exit(), which does not emit
+   * 'beforeExit', so the batch processor's own exit handler cannot be relied on
+   * to ship what is still queued — and with a 60s flush interval most of a
+   * short session's events are still queued. Shutdown callers await this
+   * instead. Bounded and non-throwing: an unreachable backend must not delay or
+   * fail an exit.
+   *
+   * The deadline stops this method awaiting; it does not cancel the flush. A
+   * batch sends events, workflows and mutations as separate sequential
+   * requests, so work already under way can continue past the deadline —
+   * bounded per request by telemetryFetch's FETCH_TIMEOUT_MS abort, not in
+   * total. That is acceptable only because every caller exits immediately
+   * after this returns, ending the process before the remainder matters.
+   */
+  async flushBeforeExit(timeoutMs: number = TELEMETRY_CONFIG.SHUTDOWN_FLUSH_TIMEOUT_MS): Promise<void> {
+    if (!this.isInitialized || !this.configManager.isEnabled()) return;
+
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      const deadline = new Promise<void>(resolve => {
+        timer = setTimeout(resolve, timeoutMs);
+        // Never let the deadline itself hold the event loop open
+        timer.unref?.();
+      });
+
+      await Promise.race([this.flush(), deadline]);
+    } catch (error) {
+      logger.debug('Telemetry flush before exit failed:', error);
+    } finally {
+      // Clear on every path, so a rejecting flush cannot leave the deadline
+      // pending — harmless while unref'd, but it would surface under fake timers.
+      if (timer) clearTimeout(timer);
     }
   }
 

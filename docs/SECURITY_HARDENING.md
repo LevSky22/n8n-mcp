@@ -10,7 +10,7 @@ Whoever has access to the MCP session effectively has the same privileges as the
 |---|---|---|
 | `AUTH_TOKEN` | Required for HTTP mode. Use a strong random value (min 32 chars). | `openssl rand -base64 32` |
 | `DISABLED_TOOLS` | Comma-separated list of MCP tools to disable. | `n8n_create_workflow,n8n_test_workflow` |
-| `WEBHOOK_SECURITY_MODE` | SSRF gate applied to webhook trigger URLs, the n8n API client (`N8N_API_URL`), and per-request URLs from the `x-n8n-url` header. Default `strict` blocks localhost, RFC1918, and cloud metadata endpoints. Use `moderate` to allow localhost (e.g. `http://localhost:5678`) while still blocking RFC1918 and metadata. `permissive` allows RFC1918 too — only suitable when n8n-mcp and n8n share a private Docker/Kubernetes network. Cloud metadata endpoints (169.254.169.254, metadata.google.internal, etc.) are blocked in all modes. | `moderate` |
+| `WEBHOOK_SECURITY_MODE` | SSRF gate applied to webhook trigger URLs, the n8n API client (`N8N_API_URL`), and per-request URLs from the `x-n8n-url` header. Default `strict` blocks localhost, RFC1918, other IANA special-purpose ranges that are not globally reachable (including `100.64.0.0/10` shared address space, multicast, and broadcast), and cloud metadata endpoints. Use `moderate` to allow localhost (e.g. `http://localhost:5678`) while still blocking the rest. `permissive` allows all of them except metadata — only suitable when n8n-mcp and n8n share a private Docker/Kubernetes network, or when your n8n instance is reachable only over a CGNAT-range overlay such as Tailscale. Cloud metadata endpoints (169.254.169.254, metadata.google.internal, etc.) are blocked in all modes. | `moderate` |
 
 ## Restricting Workflow Capabilities
 

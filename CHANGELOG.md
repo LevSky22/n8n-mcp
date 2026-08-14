@@ -11,6 +11,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Dual-era stateless MCP transport.** The HTTP MCP endpoint now uses the split TypeScript SDK v2 server packages and serves both initialize-era clients and MCP 2026-07-28 clients from the same request-scoped handler. Existing stateless tenant isolation is preserved, while modern clients can use the new discovery-based protocol without a separate endpoint. The embedded outgoing MCP client remains on SDK v1 only for its WebSocket transport, which SDK v2 no longer provides.
 
+## [2.69.0] - 2026-08-08
+
+### Security
+
+- Fix incomplete IPv6 link-local filtering in outbound URL validation (GHSA-2x5j-hrmv-ccrq). Reported by @kaimandalic.
+
+### Changed
+
+- **Outbound URL validation now rejects more non-globally-reachable address blocks.** Alongside the ranges already refused, `strict` and `moderate` modes now also reject `100.64.0.0/10` (RFC 6598 shared address space), `192.0.0.0/24` (RFC 6890 IETF protocol assignments), `224.0.0.0/4` and `ff00::/8` (multicast), and `240.0.0.0/4` including the `255.255.255.255` broadcast address. This is a behavior change for anyone whose n8n instance is reachable only at such an address — most plausibly within `100.64.0.0/10`, which is used by Tailscale, some Kubernetes pod CIDRs, and carrier-grade NAT. Those deployments can keep working via the existing `WEBHOOK_SECURITY_MODE=permissive` setting, but note that it is coarse: it re-allows every private range at once, leaving only cloud-metadata endpoints and non-canonical IPv6 tunneling blocked. Documentation and benchmarking ranges (`192.0.2.0/24`, `198.51.100.0/24`, `203.0.113.0/24`, `198.18.0.0/15`, `2001:db8::/32`) remain allowed, unchanged from previous releases. In the other direction, a small set of addresses in IETF-reserved space whose short first hextet happened to match the previous text-based prefix tests (`fc::`, `fd::`, `fec::` and neighbours) are no longer classified as unique-local or site-local; nothing is assignable or routable in that space.
+
+## [2.68.4] - 2026-08-07
+
+### Fixed
+
+- **Skill assets now ship with the skills that reference them.** `sync-skills.ts` copied `.md` files only, so the six template files under `n8n-self-hosting/assets/` — `docker-compose.single.yml`, `docker-compose.queue.yml`, `Caddyfile`, `init-data.sh`, and the two `.env.*.example` files — were absent from every published npm and Docker artifact. The skill instructs the agent to pipe them to the target host (`ssh <target> 'cat > …' < assets/docker-compose.single.yml`), so a deployment driven from the packaged skill referenced files that did not exist. The sync now copies every file in the tree, excluding only `.DS_Store` and the `*-workspace/` eval debris it already skipped.
+- **Two packaging rules that would have silently undone the sync.** The `files` allowlist in `package.json` was scoped to `data/skills/**/*.md`, and `.npmignore` carries project-wide `docker-compose*.yml` and `.env.*` rules that matched four of the six assets by name. Both are corrected, and `npm pack` was verified to contain all six. Docker was already copying the directory wholesale and needed no change.
+
+## [2.68.3] - 2026-08-07
+
+### Fixed
+
+- **The telemetry first-run notice no longer corrupts the JSON-RPC stream.** In stdio mode `process.stdout` is the protocol channel, and the notice was written with `console.log`, so every fresh install fed 34 lines of box-drawing characters into the client's JSON parser — Claude Desktop logged one `SyntaxError: ... is not valid JSON` per line at startup. The handshake still completed, because the SDK skips unparseable lines, but a stricter client would drop the connection. The notice now goes to stderr, which is the channel the MCP specification reserves for logging and which Claude Desktop persists to `mcp-server-*.log`. This also makes the notice more visible than before rather than less: the published bin replaces every `console` method with a no-op, so on that path the notice previously reached nobody at all. `n8n-mcp telemetry status` output is unaffected and stays on stdout.
+- **The direct `dist/mcp/index.js` entrypoint now shields stdout in stdio mode.** Only `stdio-wrapper.ts`, the published npm bin, filtered non-protocol stdout writes; `index.js` had no such guard even though `docs/SELF_HOSTING.md` and `docs/README_CLAUDE_SETUP.md` instruct source installs to point their client at it, which is how the notice above reached a live client. The filter is extracted to `src/utils/stdio-guard.ts` and shared by both entrypoints, so a stray write from a native module or dependency is redirected to stderr rather than breaking the stream. It is installed only when the mode is not http, leaving http-mode stdout untouched. The guard on `index.js` remains weaker than the wrapper by construction: the wrapper is a preamble that runs before `./server` is required, whereas `index.js` imports the server at module load, so import-time writes are still uncovered there. Unlike the wrapper, `index.js` does not silence `console`, because `logger.error()` writes through `console.error` and stderr is the only diagnostic channel a stdio server has. Docker is unaffected either way — its entrypoint already execs the wrapper.
+- **A misspelled `MCP_MODE` no longer starts an unguarded stdio server.** Transport selection treats anything that is not literally `http` as stdio, so gating the guard on `=== 'stdio'` left `STDIO`, a stray trailing space, or a typo running the stdio transport with no protection at all — measured at 43 non-protocol lines on the channel before the handshake response. The guard now uses the same `!== 'http'` predicate as the selection it protects, so the two cannot disagree.
+- **Embedding the server no longer corrupts the channel.** `N8NDocumentationMCPServer` is exported from the package root, and constructing it directly bypasses both bin scripts, so an embedder driving the stdio transport got no guard at all (38 non-protocol lines). The guard is now installed from the server itself: in `run()`, where connecting a `StdioServerTransport` is the moment stdout becomes the protocol channel, and in the constructor when an MCP mode is declared and is not http — the constructor starts database initialization without awaiting it, so waiting for `run()` would already be too late. `installStdioGuard()` is exported for embedders that declare no mode and want to opt in before constructing. Installation is idempotent, so the entrypoint and server calls do not stack.
+- **Removed leftover debug logging from Python code validation.** Three `console.log` calls in `config-validator.ts` fired on `validate_node` for Python Code nodes matching a specific fixture string, putting raw text on the protocol channel mid-request.
+
+## [2.68.2] - 2026-08-06
+
+### Changed
+
+- **Telemetry publishable key rotated.** The backend key moves from the legacy Supabase anon JWT to the new publishable key format (`sb_publishable_…`). `SUPABASE_ANON_KEY` still overrides the bundled default, so anyone pointing telemetry at their own project is unaffected.
+- **Telemetry batch flush interval raised from 5s to 60s.** Fewer, larger inserts for the same data.
+
+### Fixed
+
+- **Test runs no longer reach the telemetry backend.** Nothing disabled telemetry in the test environment, so with no config file present the first-run default left it enabled: test-generated rows could be delivered to the production project, and every server teardown blocked on a real round-trip (measured at 20 shutdowns costing 30s against an unreachable host). `vitest.config.ts` now sets `N8N_MCP_TELEMETRY_DISABLED`, and the config-manager suite manages the opt-out variables itself rather than inheriting them.
+- **Queued telemetry is no longer lost on shutdown.** Every shutdown path ends in `process.exit()`, which does not emit `beforeExit`, so the batch processor's own exit handler never ran: whatever was queued since the last interval flush was dropped. Raising the flush interval to 60s widened that window enough to lose most short sessions, including single-mutation ones (mutations auto-flush only from the second queued record onward). The MCP server's `shutdown()` and the single-session HTTP server's now await `telemetry.flushBeforeExit()`, a bounded, non-throwing final flush that cannot delay or fail an exit if the backend is unreachable.
+- **Mutation telemetry no longer sends the pre-mutation workflow.** `workflow_before` was a full second copy of a workflow on every partial or full update, roughly doubling each mutation row for a snapshot nothing queried. The record now carries `workflow_after` only; the before snapshot is still built locally to drive deduplication, the meaningful-change check, and `workflow_hash_before` / `workflow_structure_hash_before`, which continue to identify the prior state.
+
 ## [2.68.1] - 2026-08-04
 
 ### Changed

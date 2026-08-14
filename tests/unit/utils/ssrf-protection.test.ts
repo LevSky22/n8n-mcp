@@ -442,6 +442,46 @@ describe('SSRFProtection', () => {
       expect(result.valid).toBe(false);
       expect(result.reason).toContain('IPv6 private');
     });
+
+    // SECURITY (GHSA-2x5j-hrmv-ccrq): the resolved-address path shares the
+    // classifier with validateUrlSync, so the same edges are asserted here.
+    it.each([
+      ['fe81::1',   'link-local'],
+      ['febf::1',   'last hextet of link-local'],
+      ['feff::1',   'last hextet of site-local'],
+      ['ff02::1',   'multicast'],
+      ['FE90::1',   'link-local, uppercase from resolver'],
+    ])('should block resolved IPv6 %s (%s) in strict mode', async (address) => {
+      delete process.env.WEBHOOK_SECURITY_MODE;
+      vi.mocked(dns.lookup).mockResolvedValue({ address, family: 6 } as any);
+
+      const result = await SSRFProtection.validateWebhookUrl('http://resolved-ipv6.com/webhook');
+      expect(result.valid).toBe(false);
+      expect(result.reason).toContain('IPv6 private');
+    });
+
+    it.each([
+      ['fe81::1.2.3.4', 'link-local'],
+      ['2001:db8::1.2.3.4', 'otherwise-allowed range'],
+    ])('should fail closed when the resolved address parses inconsistently: %s (%s)', async (address) => {
+      // net.isIPv6 accepts this form; ipaddr.js does not. The classifier must
+      // not treat "cannot classify" as "public".
+      delete process.env.WEBHOOK_SECURITY_MODE;
+      vi.mocked(dns.lookup).mockResolvedValue({ address, family: 6 } as any);
+
+      const result = await SSRFProtection.validateWebhookUrl('http://resolved-odd-form.com/webhook');
+      expect(result.valid).toBe(false);
+      expect(result.reason).toContain('IPv6 private');
+    });
+
+    it('should block a hostname resolving into shared address space (strict mode)', async () => {
+      delete process.env.WEBHOOK_SECURITY_MODE;
+      vi.mocked(dns.lookup).mockResolvedValue({ address: '100.90.1.1', family: 4 } as any);
+
+      const result = await SSRFProtection.validateWebhookUrl('http://resolved-cgnat.com/webhook');
+      expect(result.valid).toBe(false);
+      expect(result.reason).toContain('Private IP');
+    });
   });
 
   describe('DNS Resolution Failures', () => {
@@ -853,6 +893,82 @@ describe('SSRFProtection', () => {
         const result = SSRFProtection.validateUrlSync(url);
         expect(result.valid).toBe(false);
         expect(result.reason).toBe('IPv6 private/mapped address not allowed');
+      });
+    });
+
+    // SECURITY (GHSA-2x5j-hrmv-ccrq): each range is asserted at both of its
+    // edges plus the address just outside, so a future prefix edit that
+    // widens or narrows a block fails here rather than in production.
+    describe('range boundaries (GHSA-2x5j-hrmv-ccrq)', () => {
+      beforeEach(() => {
+        delete process.env.WEBHOOK_SECURITY_MODE;
+      });
+
+      it.each([
+        ['fe80::1',   'first hextet of link-local'],
+        ['fe81::1',   'link-local'],
+        ['fe8f::1',   'link-local'],
+        ['fe90::1',   'link-local'],
+        ['fea5::1',   'link-local'],
+        ['feb0::1',   'link-local'],
+        ['febf::1',   'last hextet of link-local'],
+        ['fec0::1',   'first hextet of site-local'],
+        ['feff::1',   'last hextet of site-local'],
+        ['fc00::1',   'first hextet of unique local'],
+        ['fdff::1',   'last hextet of unique local'],
+        ['ff02::1',   'link-local scope multicast'],
+        ['ff05::1:3', 'site-local scope multicast'],
+        ['ff0e::1',   'global scope multicast'],
+      ])('should block IPv6 %s (%s)', (address) => {
+        const result = SSRFProtection.validateUrlSync(`http://[${address}]`);
+        expect(result.valid).toBe(false);
+        expect(result.reason).toBe('IPv6 private/mapped address not allowed');
+      });
+
+      it.each([
+        ['fe7f::1',     'immediately below link-local'],
+        ['fe00::1',     'below link-local'],
+        // First hextet 0x0fe8-0x0feb, outside every block above.
+        ['fe8::1',      'below link-local'],
+        ['feb::1',      'below link-local'],
+        ['fbff::1',     'immediately below unique local'],
+        // Short hextets in IETF-reserved space (0x00fc, 0x00fd, 0x0fec). The
+        // previous text-prefix tests matched these as if they were ULA or
+        // site-local; classifying numerically does not. Nothing is assignable
+        // or routable there, so allowing them reaches no target.
+        ['fc::1',       'IETF-reserved, not unique local'],
+        ['fd::1',       'IETF-reserved, not unique local'],
+        ['fec::1',      'IETF-reserved, not site-local'],
+        ['2001:db8::1', 'documentation range, deliberately still allowed'],
+      ])('should not block IPv6 %s (%s)', (address) => {
+        const result = SSRFProtection.validateUrlSync(`http://[${address}]`);
+        expect(result.valid, `address=${address}`).toBe(true);
+      });
+
+      it.each([
+        ['100.64.0.0',      'first address of shared address space'],
+        ['100.90.1.1',      'shared address space'],
+        ['100.127.255.255', 'last address of shared address space'],
+        ['192.0.0.1',       'IETF protocol assignments'],
+        ['224.0.0.1',       'first address of multicast'],
+        ['239.255.255.250', 'last block of multicast'],
+        ['240.0.0.1',       'first address of reserved'],
+        ['255.255.255.255', 'broadcast'],
+      ])('should block IPv4 %s (%s)', (address) => {
+        const result = SSRFProtection.validateUrlSync(`http://${address}`);
+        expect(result.valid).toBe(false);
+        expect(result.reason).toBe('Private IP addresses not allowed');
+      });
+
+      it.each([
+        ['100.63.255.255',  'just below shared address space'],
+        ['100.128.0.0',     'just above shared address space'],
+        ['192.0.1.1',       'just above IETF protocol assignments'],
+        ['223.255.255.255', 'just below multicast'],
+        ['198.18.0.1',      'benchmarking range, deliberately still allowed'],
+      ])('should not block IPv4 %s (%s)', (address) => {
+        const result = SSRFProtection.validateUrlSync(`http://${address}`);
+        expect(result.valid, `address=${address}`).toBe(true);
       });
     });
   });

@@ -395,6 +395,85 @@ describe('TelemetryManager', () => {
     });
   });
 
+  describe('flushBeforeExit()', () => {
+    beforeEach(() => {
+      manager = TelemetryManager.getInstance();
+      // Initialize so the shutdown flush has a client to work with
+      manager.trackEvent('test', {});
+    });
+
+    it('should ship queued data so shutdown does not rely on beforeExit', async () => {
+      const events = [{ user_id: 'user1', event: 'test', properties: {} }];
+      mockEventTracker.getEventQueue.mockReturnValue(events);
+      mockEventTracker.getWorkflowQueue.mockReturnValue([]);
+      mockEventTracker.getMutationQueue.mockReturnValue([]);
+
+      await manager.flushBeforeExit();
+
+      expect(mockBatchProcessor.flush).toHaveBeenCalledWith(events, [], []);
+    });
+
+    it('should return by the deadline when the backend never responds', async () => {
+      // A flush that never settles: shutdown must not hang behind it. Fake timers
+      // keep this deterministic instead of asserting on wall-clock elapsed time.
+      vi.useFakeTimers();
+      try {
+        mockBatchProcessor.flush.mockReturnValue(new Promise(() => {}));
+
+        let settled = false;
+        const pending = manager.flushBeforeExit(5000).then(() => {
+          settled = true;
+        });
+
+        await vi.advanceTimersByTimeAsync(4999);
+        expect(settled).toBe(false);
+
+        await vi.advanceTimersByTimeAsync(1);
+        await pending;
+        expect(settled).toBe(true);
+        expect(mockBatchProcessor.flush).toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('should not throw when the flush rejects', async () => {
+      // Reject from flush() itself rather than the batch processor: flush()
+      // swallows its own errors, so mocking the processor would leave
+      // flushBeforeExit's catch block unexercised.
+      vi.spyOn(manager, 'flush').mockRejectedValue(new Error('network down'));
+
+      await expect(manager.flushBeforeExit(50)).resolves.toBeUndefined();
+    });
+
+    it('should do nothing when telemetry is disabled', async () => {
+      mockConfigManager.isEnabled.mockReturnValue(false);
+
+      await manager.flushBeforeExit();
+
+      expect(mockBatchProcessor.flush).not.toHaveBeenCalled();
+    });
+
+    it('should not initialize telemetry when it never was', async () => {
+      // The load-bearing safety property: a shutdown must never be the thing
+      // that creates a Supabase client. Tests and telemetry-disabled users hit
+      // this path on every server teardown.
+      TelemetryManager.resetInstance();
+      vi.mocked(createClient).mockClear();
+      const untouched = TelemetryManager.getInstance();
+
+      // The assertions below only have teeth while the mocked config manager
+      // reports enabled — otherwise a missing guard would be masked by the
+      // disabled check rather than caught.
+      expect(mockConfigManager.isEnabled()).toBe(true);
+
+      await untouched.flushBeforeExit();
+
+      expect(createClient).not.toHaveBeenCalled();
+      expect(mockBatchProcessor.flush).not.toHaveBeenCalled();
+    });
+  });
+
   describe('enable/disable functionality', () => {
     beforeEach(() => {
       manager = TelemetryManager.getInstance();

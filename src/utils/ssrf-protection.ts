@@ -64,19 +64,26 @@ const PRIVATE_IP_RANGES = [
   /^169\.254\./,                    // 169.254.0.0/16 (Link-local)
   /^127\./,                         // 127.0.0.0/8 (Loopback)
   /^0\./,                           // 0.0.0.0/8 (Invalid)
+  // SECURITY (GHSA-2x5j-hrmv-ccrq): IANA special-purpose blocks that are not
+  // globally reachable and therefore never a legitimate outbound target.
+  /^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./, // 100.64.0.0/10 (RFC 6598 shared address space)
+  /^192\.0\.0\./,                   // 192.0.0.0/24 (RFC 6890 IETF protocol assignments)
+  /^(22[4-9]|23\d)\./,              // 224.0.0.0/4 (Multicast)
+  /^(24\d|25[0-5])\./,              // 240.0.0.0/4 (Reserved, incl. 255.255.255.255 broadcast)
 ];
 
 export class SSRFProtection {
   /**
    * IPv6 addresses that must be blocked: loopback, unspecified, link-local,
-   * unique-local, site-local (deprecated), IPv4-mapped, IPv4-compatible, and
-   * any IPv6→IPv4 tunneling address (NAT64, 6to4, Teredo) whose embedded IPv4
-   * is private or a cloud-metadata endpoint. Tunneling prefixes with a public
-   * embedded IPv4 are allowed so legitimate DNS64/NAT64 environments work.
+   * unique-local, site-local (deprecated), multicast, IPv4-mapped,
+   * IPv4-compatible, and any IPv6→IPv4 tunneling address (NAT64, 6to4, Teredo)
+   * whose embedded IPv4 is private or a cloud-metadata endpoint. Tunneling
+   * prefixes with a public embedded IPv4 are allowed so legitimate DNS64/NAT64
+   * environments work.
    *
-   * Hostname must be lowercased and bracket-stripped. WHATWG URL parser
-   * canonicalizes IPv6 literals (zero compression, dotted-quad → hex pairs),
-   * so prefix matching works against the normalized form.
+   * Hostname must be bracket-stripped. WHATWG URL parser canonicalizes IPv6
+   * literals (zero compression, dotted-quad → hex pairs), so prefix matching
+   * works against the normalized form.
    *
    * @security See GHSA-56c3-vfp2-5qqj. The sync validator previously had no
    * IPv6 gate, letting `::ffff:169.254.169.254`, `::169.254.169.254`,
@@ -87,6 +94,10 @@ export class SSRFProtection {
     // (e.g. "fcexample.com") are never misclassified as private IPv6.
     if (!isIPv6(hostname)) return false;
 
+    // SECURITY (GHSA-2x5j-hrmv-ccrq): normalize case here so the helper holds
+    // its own precondition regardless of what the caller passes.
+    hostname = hostname.toLowerCase();
+
     // ::/96 reserved block: unspecified (`::`), loopback (`::1`), IPv4-mapped
     // (`::ffff:X`), and deprecated IPv4-compatible (`::X:Y` per RFC 4291) all
     // live here. Blocking the whole prefix avoids enumerating subforms.
@@ -96,14 +107,17 @@ export class SSRFProtection {
     // but keep the check in case normalization ever changes.
     if (hostname.startsWith('0:0:0:0:0:ffff:')) return true;
 
-    // Link-local fe80::/10
-    if (hostname.startsWith('fe80:')) return true;
-
-    // Site-local fec0::/10 (deprecated, RFC 3879) — still honored by some stacks.
-    if (/^fe[c-f]/.test(hostname)) return true;
-
-    // Unique local fc00::/7 (RFC 4193). Covers fc00-fdff in the first hextet.
-    if (/^f[cd]/.test(hostname)) return true;
+    // SECURITY (GHSA-2x5j-hrmv-ccrq): these blocks are matched numerically on
+    // the first hextet so each covers its full CIDR span.
+    const hextet = SSRFProtection.firstHextet(hostname);
+    // Reaching here means net.isIPv6 accepted the input, so a parse failure
+    // means the two parsers disagree about it. Fail closed rather than skip
+    // the checks below.
+    if (hextet === null) return true;
+    if ((hextet & 0xffc0) === 0xfe80) return true; // Link-local fe80::/10 (RFC 4291)
+    if ((hextet & 0xffc0) === 0xfec0) return true; // Site-local fec0::/10 (deprecated, RFC 3879)
+    if ((hextet & 0xfe00) === 0xfc00) return true; // Unique local fc00::/7 (RFC 4193)
+    if ((hextet & 0xff00) === 0xff00) return true; // Multicast ff00::/8 (RFC 4291)
 
     // Tunneling prefixes (NAT64, 6to4, Teredo) carry an embedded IPv4. Extract
     // it and reuse the IPv4 policy so we don't blanket-block legitimate users
@@ -178,6 +192,22 @@ export class SSRFProtection {
     }
 
     return null;
+  }
+
+  /**
+   * First 16-bit group of an IPv6 address, or null when the input does not
+   * parse as IPv6. Parsing is delegated to `ipaddr.js` for the same reason
+   * {@link tryExtractTunneledIPv4} does — a homegrown expander that disagreed
+   * with the OS resolver would be a hole.
+   */
+  private static firstHextet(hostname: string): number | null {
+    try {
+      const parsed = ipaddr.parse(hostname);
+      if (parsed.kind() !== 'ipv6') return null;
+      return (parsed as ipaddr.IPv6).parts[0];
+    } catch {
+      return null;
+    }
   }
 
   private static hextetsToIPv4(hi: number, lo: number): string {

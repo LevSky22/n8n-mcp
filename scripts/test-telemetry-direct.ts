@@ -4,16 +4,17 @@
  */
 
 import { createClient } from '@supabase/supabase-js';
+import { TELEMETRY_BACKEND } from '../src/telemetry/telemetry-types';
 
-const TELEMETRY_BACKEND = {
-  URL: 'https://ydyufsohxdfpopqbubwk.supabase.co',
-  ANON_KEY: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InlkeXVmc29oeGRmcG9wcWJ1YndrIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Mzc2MzAxMDgsImV4cCI6MjA1MzIwNjEwOH0.LsUTx9OsNtnqg-jxXaJPc84aBHVDehHiMaFoF2Ir8s0'
-};
+// Resolved the same way the runtime does (telemetry-manager.ts), so this script
+// always probes the credentials the package actually ships with.
+const url = process.env.SUPABASE_URL || TELEMETRY_BACKEND.URL;
+const key = process.env.SUPABASE_ANON_KEY || TELEMETRY_BACKEND.ANON_KEY;
 
 async function testDirect() {
   console.log('🧪 Direct Telemetry Test\n');
 
-  const supabase = createClient(TELEMETRY_BACKEND.URL, TELEMETRY_BACKEND.ANON_KEY, {
+  const supabase = createClient(url, key, {
     auth: {
       persistSession: false,
       autoRefreshToken: false,
