@@ -629,14 +629,74 @@ describe('MCP response bounding', () => {
     const described = queryResponseArtifact(
       artifact.id, '/data/executions', undefined, undefined, 20, undefined, 'tenant-a', true,
     ) as any;
-    expect(described.response.type).toBe('array');
-    expect(described.response.length).toBe(2);
+    expect(described.shape.type).toBe('array');
+    expect(described.shape.length).toBe(2);
     // Keys merge across sampled items, so a heterogeneous array still yields usable pointers.
-    const names = described.response.item_keys.map((key: any) => key.name).sort();
+    const names = described.shape.item_keys.map((key: any) => key.name).sort();
     expect(names).toEqual(['extra', 'id', 'nested', 'status']);
-    expect(described.response.item_keys.find((k: any) => k.name === 'id').pointer).toBe('/id');
+    expect(described.shape.item_keys.find((k: any) => k.name === 'id').pointer).toBe('/id');
     expect(JSON.stringify(described)).not.toContain('error');
     expect(described.response_meta.complete).toBe(true);
+    expect(described.response_meta.contract_version).toBe(2);
+    expect(described.response_meta.artifact).toBeUndefined();
+  });
+
+  it('filters native n8n connection maps through generic object entries', () => {
+    const connections = {
+      'Source Alpha': { main: [[{ node: 'Transform Alpha', type: 'main', index: 0 }]] },
+      'Source Beta': { main: [[{ node: 'Decision Beta', type: 'main', index: 0 }]] },
+      'Decision Beta': { main: [[{ node: 'Sink Beta', type: 'main', index: 0 }]] },
+    };
+    const artifact = persistResponseArtifact({ data: { connections } }, 'tenant-a');
+    const result = queryResponseArtifact(
+      artifact.id,
+      '/data/connections',
+      ['key', '/value/main'],
+      [{ path: '/key', op: 'in', value: ['Source Alpha', 'Decision Beta'] }],
+      20,
+      undefined,
+      'tenant-a',
+      false,
+      'entries',
+    ) as any;
+
+    expect(result.response.map((entry: any) => entry.key)).toEqual([
+      'Source Alpha',
+      'Decision Beta',
+    ]);
+    expect(result.response_meta).toMatchObject({ contract_version: 2, total_count: 2, complete: true });
+  });
+
+  it('pages object shape keys with absolute pointers and binds the cursor to the view', () => {
+    const artifact = persistResponseArtifact({ data: { map: { 'a/b': 1, 'c~d': 2, third: 3 } } }, 'tenant-a');
+    const first = queryResponseArtifact(
+      artifact.id, '/data/map', undefined, undefined, 2, undefined, 'tenant-a', true,
+    ) as any;
+    expect(first.shape.keys.map((key: any) => key.pointer)).toEqual(['/data/map/a~1b', '/data/map/c~0d']);
+    expect(first.response_meta.next_cursor).toBeTruthy();
+
+    const second = queryResponseArtifact(
+      artifact.id, '/data/map', undefined, undefined, 2, first.response_meta.next_cursor, 'tenant-a', true,
+    ) as any;
+    expect(second.shape.keys.map((key: any) => key.pointer)).toEqual(['/data/map/third']);
+    expect(second.response_meta.complete).toBe(true);
+    expect(() => queryResponseArtifact(
+      artifact.id, '/data/map', ['third'], undefined, 2, undefined, 'tenant-a', true,
+    )).toThrow('describe cannot be combined');
+  });
+
+  it('uses compact JSON for the inline threshold and caps artifact previews separately', () => {
+    const value = {
+      rows: Array.from({ length: 440 }, (_, index) => ({ id: index, label: `row-${index}`, active: true })),
+    };
+    expect(Buffer.byteLength(JSON.stringify(value))).toBeLessThan(INLINE_RESULT_BYTES);
+    expect(Buffer.byteLength(JSON.stringify(value, null, 2))).toBeGreaterThan(INLINE_RESULT_BYTES);
+    expect(boundToolResult('additional_large_tool', value, 'tenant-a')).toEqual(value);
+
+    const oversized = { rows: Array.from({ length: 80 }, (_, index) => ({ index, payload: 'x'.repeat(1000) })) };
+    const bounded = boundToolResult('additional_large_tool', oversized, 'tenant-a') as any;
+    expect(bounded.response_meta.artifact).toBeTruthy();
+    expect(Buffer.byteLength(JSON.stringify(bounded))).toBeLessThanOrEqual(8 * 1024);
   });
 
   it('marks truncated arrays and preserves scalars at every depth', () => {

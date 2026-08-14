@@ -1727,6 +1727,7 @@ export class N8NDocumentationMCPServer {
         args.cursor,
         owner,
         args.describe === true,
+        args.objectMode,
       );
     }
 
