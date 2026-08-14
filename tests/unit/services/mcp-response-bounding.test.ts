@@ -1,7 +1,8 @@
+import { createHash, createHmac } from 'crypto';
 import { existsSync, mkdtempSync, readFileSync, rmSync, unlinkSync, utimesSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import path from 'path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
   ARTIFACT_PAGE_BYTES,
@@ -24,6 +25,15 @@ describe('MCP response bounding', () => {
 
   afterEach(() => {
     delete process.env.MCP_RESPONSE_ARTIFACT_ROOT;
+    delete process.env.MCP_RESPONSE_CURSOR_KEY;
+    delete process.env.MCP_RESPONSE_INLINE_BYTES;
+    delete process.env.MCP_RESPONSE_PREVIEW_BYTES;
+    delete process.env.MCP_RESPONSE_HARD_BYTES;
+    delete process.env.MCP_RESPONSE_ARTIFACT_PAGE_BYTES;
+    delete process.env.MCP_RESPONSE_ARTIFACT_MAX_BYTES;
+    delete process.env.MCP_RESPONSE_ARTIFACT_TTL_MS;
+    delete process.env.MCP_RESPONSE_ARTIFACT_QUOTA_BYTES;
+    delete process.env.MCP_RESPONSE_PARSE_CACHE_TTL_MS;
     rmSync(root, { recursive: true, force: true });
   });
 
@@ -643,16 +653,16 @@ describe('MCP response bounding', () => {
 
   it('filters native n8n connection maps through generic object entries', () => {
     const connections = {
-      'Live Service Date Contradiction?': { main: [[{ node: 'Build Follow-Up Context', type: 'main', index: 0 }]] },
-      'Execution Data - Follow-Up Candidate': { main: [[{ node: 'Task Eligible?', type: 'main', index: 0 }]] },
-      'Task Eligible?': { main: [[{ node: 'Get Task Comments', type: 'main', index: 0 }]] },
+      'Source Alpha': { main: [[{ node: 'Transform Alpha', type: 'main', index: 0 }]] },
+      'Source Beta': { main: [[{ node: 'Decision Beta', type: 'main', index: 0 }]] },
+      'Decision Beta': { main: [[{ node: 'Sink Beta', type: 'main', index: 0 }]] },
     };
     const artifact = persistResponseArtifact({ data: { connections } }, 'tenant-a');
     const result = queryResponseArtifact(
       artifact.id,
       '/data/connections',
       ['key', '/value/main'],
-      [{ path: '/key', op: 'in', value: ['Live Service Date Contradiction?', 'Task Eligible?'] }],
+      [{ path: '/key', op: 'in', value: ['Source Alpha', 'Decision Beta'] }],
       20,
       undefined,
       'tenant-a',
@@ -661,10 +671,174 @@ describe('MCP response bounding', () => {
     ) as any;
 
     expect(result.response.map((entry: any) => entry.key)).toEqual([
-      'Live Service Date Contradiction?',
-      'Task Eligible?',
+      'Source Alpha',
+      'Decision Beta',
     ]);
     expect(result.response_meta).toMatchObject({ contract_version: 2, total_count: 2, complete: true });
+  });
+
+  it('validates object entry mode and describe combinations', () => {
+    const artifact = persistResponseArtifact({
+      map: { alpha: 1 },
+      rows: [{ id: 1 }],
+      scalar: 42,
+    }, 'tenant-a');
+
+    expect(() => queryResponseArtifact(
+      artifact.id, '/map', undefined, undefined, 20, undefined, 'tenant-a', true, 'entries',
+    )).toThrow('describe cannot be combined with objectMode');
+    expect(() => queryResponseArtifact(
+      artifact.id, '/map', undefined, undefined, 20, undefined, 'tenant-a', false, 'other' as any,
+    )).toThrow('Unsupported objectMode');
+    expect(() => queryResponseArtifact(
+      artifact.id, '/rows', undefined, undefined, 20, undefined, 'tenant-a', false, 'entries',
+    )).toThrow('requires responsePath to select a JSON object');
+    expect(() => queryResponseArtifact(
+      artifact.id, '/scalar', undefined, undefined, 20, undefined, 'tenant-a', false, 'entries',
+    )).toThrow('it selects number');
+  });
+
+  it('warns when an oversized scalar comes from an already truncated source', () => {
+    const artifact = persistResponseArtifact({
+      hasMoreData: true,
+      value: 'x'.repeat(40 * 1024),
+    }, 'tenant-a');
+
+    const result = queryResponseArtifact(
+      artifact.id, '/value', undefined, undefined, 20, undefined, 'tenant-a',
+    ) as any;
+
+    expect(result.response_meta).toMatchObject({
+      truncated: true,
+      source_truncated: true,
+      truncation_reason: 'scalar_size_limit',
+    });
+    expect(result.response_meta.warning).toContain('reduced view');
+    expect(result.response_meta.warning).toContain('read_response_artifact');
+  });
+
+  it('describes scalar, empty-array, and child-array shapes', () => {
+    const artifact = persistResponseArtifact({
+      text: 'alpha',
+      empty: [],
+      record: { children: [1, 2, 3] },
+    }, 'tenant-a');
+
+    const scalar = queryResponseArtifact(
+      artifact.id, '/text', undefined, undefined, 20, undefined, 'tenant-a', true,
+    ) as any;
+    expect(scalar.shape).toEqual({ type: 'string', length: 5 });
+
+    const empty = queryResponseArtifact(
+      artifact.id, '/empty', undefined, undefined, 20, undefined, 'tenant-a', true,
+    ) as any;
+    expect(empty.shape).toMatchObject({ type: 'array', length: 0, item_type: null });
+
+    const record = queryResponseArtifact(
+      artifact.id, '/record', undefined, undefined, 20, undefined, 'tenant-a', true,
+    ) as any;
+    expect(record.shape.keys).toContainEqual(expect.objectContaining({ name: 'children', length: 3 }));
+  });
+
+  it('compacts valid and malformed workflow connection groups within the edge limit', async () => {
+    vi.resetModules();
+    process.env.MCP_RESPONSE_ARTIFACT_ROOT = root;
+    process.env.MCP_RESPONSE_CURSOR_KEY = 'coverage-test-connections-key';
+    process.env.MCP_RESPONSE_PREVIEW_BYTES = String(64 * 1024);
+    const fresh = await import('../../../src/services/mcp-response-bounding');
+    const targets = Array.from({ length: 402 }, (_, index) => ({
+      node: `S${index}`,
+      type: 'main',
+      index,
+    }));
+    const connections: Record<string, unknown> = {
+      'Source Alpha': { main: [targets] },
+      'Source Beta': { main: 'invalid-groups' },
+      'Source Gamma': { main: [null] },
+      'Source Delta': null,
+      'Source Epsilon': { main: [[null, { node: 'Sink Epsilon' }]] },
+      'Source Zeta': { main: [[{ node: 'Sink Zeta', index: 1 }]] },
+    };
+    const value = {
+      success: true,
+      data: {
+        id: 'workflow-connections',
+        name: 'Connection coverage',
+        nodes: [{ id: 'node-1', name: 'Source Alpha', type: 'n8n-nodes-base.code' }],
+        connections,
+        filler: 'x'.repeat(40 * 1024),
+      },
+    };
+
+    const bounded = fresh.boundToolResult('n8n_get_workflow', value, 'tenant-a') as any;
+    expect(bounded.data.data.connections).toHaveLength(400);
+    expect(bounded.data.data.connections_omitted).toBe(4);
+    expect(bounded.response_meta.artifact.primary_paths).toContain('/data/connections');
+  });
+
+  it('supports deterministic configuration and rejects signed invalid cursor states', async () => {
+    vi.resetModules();
+    process.env.MCP_RESPONSE_ARTIFACT_ROOT = root;
+    process.env.MCP_RESPONSE_CURSOR_KEY = 'coverage-test-cursor-key';
+    process.env.MCP_RESPONSE_INLINE_BYTES = 'invalid';
+    process.env.MCP_RESPONSE_PREVIEW_BYTES = '4096';
+    process.env.MCP_RESPONSE_HARD_BYTES = '131072';
+    process.env.MCP_RESPONSE_ARTIFACT_PAGE_BYTES = '4096';
+    const fresh = await import('../../../src/services/mcp-response-bounding');
+
+    expect(fresh.INLINE_RESULT_BYTES).toBe(32 * 1024);
+    expect(fresh.PREVIEW_RESULT_BYTES).toBe(4096);
+
+    const artifact = fresh.persistResponseArtifact({ rows: [1, 2, 3] }, 'tenant-a');
+    const scopedOwner = createHash('sha256').update('tenant-a').digest('hex');
+    const otherOwner = createHash('sha256').update('tenant-b').digest('hex');
+    const sign = (state: Record<string, unknown>, version = 2): string => {
+      const payload = Buffer.from(JSON.stringify({ v: version, ...state }));
+      const signature = createHmac('sha256', 'coverage-test-cursor-key').update(payload).digest();
+      return Buffer.concat([payload, signature]).toString('base64url');
+    };
+
+    expect(() => fresh.readResponseArtifact(
+      artifact.id, sign({ artifactId: artifact.id, offset: 0, owner: scopedOwner }, 1), 'tenant-a',
+    )).toThrow('unsupported response contract version');
+    expect(() => fresh.readResponseArtifact(
+      artifact.id, sign({ artifactId: artifact.id, offset: 0, owner: otherOwner }), 'tenant-a',
+    )).toThrow('different MCP scope');
+    expect(() => fresh.readResponseArtifact(
+      artifact.id, sign({ artifactId: artifact.id, offset: 1_000_000, owner: scopedOwner }), 'tenant-a',
+    )).toThrow('past the end');
+
+    const queryState = {
+      artifactId: artifact.id,
+      owner: scopedOwner,
+      viewHash: 'wrong-view',
+      offset: 0,
+    };
+    expect(() => fresh.queryResponseArtifact(
+      artifact.id, '/rows', undefined, undefined, 1, sign({ ...queryState, owner: otherOwner }), 'tenant-a',
+    )).toThrow('different MCP scope');
+    expect(() => fresh.queryResponseArtifact(
+      artifact.id, '/rows', undefined, undefined, 1, sign(queryState), 'tenant-a',
+    )).toThrow('does not match this query');
+  });
+
+  it('enforces deliberately restrictive configured response budgets', async () => {
+    vi.resetModules();
+    process.env.MCP_RESPONSE_ARTIFACT_ROOT = root;
+    process.env.MCP_RESPONSE_CURSOR_KEY = 'coverage-test-budget-key';
+    process.env.MCP_RESPONSE_INLINE_BYTES = '1024';
+    process.env.MCP_RESPONSE_PREVIEW_BYTES = '1';
+    process.env.MCP_RESPONSE_HARD_BYTES = '64';
+    const fresh = await import('../../../src/services/mcp-response-bounding');
+
+    expect(() => fresh.boundToolResult(
+      'additional_large_tool', { value: 'x'.repeat(2048) }, 'tenant-a',
+    )).toThrow('hard serialized-size limit');
+
+    const artifact = fresh.persistResponseArtifact({ rows: [{ id: 1 }] }, 'tenant-a');
+    expect(() => fresh.queryResponseArtifact(
+      artifact.id, '/rows', undefined, undefined, 20, undefined, 'tenant-a',
+    )).toThrow('hard serialized-size limit');
   });
 
   it('pages object shape keys with absolute pointers and binds the cursor to the view', () => {

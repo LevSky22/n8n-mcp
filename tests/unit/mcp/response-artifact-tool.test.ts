@@ -149,6 +149,31 @@ describe('response artifact MCP tool', () => {
     });
   });
 
+  it('uses the default page size during direct tenant-scoped query dispatch', async () => {
+    const context: InstanceContext = {
+      n8nApiUrl: 'https://example.n8n.cloud',
+      n8nApiKey: 'api-key',
+      instanceId: 'tenant-default-page',
+    };
+    const artifact = persistResponseArtifact(
+      { rows: Array.from({ length: 25 }, (_, id) => ({ id })) },
+      getInstanceScopeId(context),
+    );
+    const server = new TestableN8NMCPServer(context);
+
+    const result = await server.testExecuteTool('query_response_artifact', {
+      artifactId: artifact.id,
+      responsePath: '/rows',
+    });
+
+    expect(result.response).toHaveLength(20);
+    expect(result.response_meta).toMatchObject({
+      returned_count: 20,
+      total_count: 25,
+      complete: false,
+    });
+  });
+
   it('requires query artifact id and response path', async () => {
     const server = new TestableN8NMCPServer();
     await expect(server.testExecuteTool('query_response_artifact', {})).rejects.toThrow(
