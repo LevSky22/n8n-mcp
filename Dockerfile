@@ -47,6 +47,7 @@ COPY package.runtime.json package.json
 # This enables native SQLite (better-sqlite3) instead of sql.js, preventing memory leaks
 RUN --mount=type=cache,target=/root/.npm \
     apk add --no-cache python3 make g++ && \
+    npm install -g npm@12.0.2 && \
     npm install --production --no-audit --no-fund && \
     apk del python3 make g++
 
