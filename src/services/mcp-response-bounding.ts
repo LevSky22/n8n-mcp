@@ -15,8 +15,8 @@ function envInt(name: string, fallback: number): number {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
-// Measured against the 2-space-indented text server.ts emits, not compact JSON.
 export const INLINE_RESULT_BYTES = envInt('MCP_RESPONSE_INLINE_BYTES', 32 * 1024);
+export const PREVIEW_RESULT_BYTES = envInt('MCP_RESPONSE_PREVIEW_BYTES', 8 * 1024);
 export const HARD_RESULT_BYTES = envInt('MCP_RESPONSE_HARD_BYTES', 128 * 1024);
 export const ARTIFACT_PAGE_BYTES = envInt('MCP_RESPONSE_ARTIFACT_PAGE_BYTES', 24 * 1024);
 export const DEFAULT_PAGE_SIZE = 20;
@@ -50,6 +50,7 @@ export interface FilterStat {
 }
 
 export interface ResponseMeta {
+  contract_version: 2;
   truncated: boolean;
   complete: boolean;
   truncation_reason: string | null;
@@ -58,7 +59,7 @@ export interface ResponseMeta {
   remaining_count: number | null;
   next_cursor: string | null;
   serialized_bytes: number;
-  artifact: ArtifactReference | null;
+  artifact?: ArtifactReference | null;
   warning: string | null;
   /** What returned_count/total_count count: array elements, object entries, or bytes. */
   page_unit?: 'items' | 'entries' | 'bytes';
@@ -133,7 +134,9 @@ export const queryResponseArtifactTool = {
     'preview is a reshaped summary, so pointers copied from it may not exist in the artifact ' +
     '(response_meta.artifact.primary_paths lists pointers that do). responsePath uses RFC 6901. ' +
     'fields accepts root names such as id or pointers such as /status/name. Arrays page by element and ' +
-    'objects page by entry; follow next_cursor until it is null. Artifact handles are valid until the ' +
+    'objects page by entry. For keyed maps such as n8n connections, set objectMode="entries" and filter ' +
+    'on /key rather than guessing nested array paths. Shape descriptions are pageable. Follow next_cursor ' +
+    'until it is null. Artifact handles are valid until the ' +
     'MCP server restarts, and at most 24 hours; an unknown handle means you should re-run the originating tool.',
   inputSchema: {
     type: 'object',
@@ -144,6 +147,11 @@ export const queryResponseArtifactTool = {
         type: 'boolean',
         description: 'Return the shape at responsePath (types, key names, array lengths) instead of values. Use this first when you do not know the structure.',
         default: false,
+      },
+      objectMode: {
+        type: 'string',
+        enum: ['entries'],
+        description: 'For an object selection, expose [{key,value}] rows so filters and fields can be applied generically.',
       },
       fields: {
         type: 'array',
@@ -180,11 +188,11 @@ function encode(value: unknown): Buffer {
 }
 
 /**
- * The single definition of how a tool result becomes text. Budgets here are only correct
- * while server.ts emits results through this, so both go through one function.
+ * The single definition of how a tool result becomes text. Compact JSON avoids spending
+ * the response budget on indentation and matches the bytes persisted in an artifact.
  */
 export function serializeToolText(value: unknown): string {
-  return JSON.stringify(value, null, 2) ?? '';
+  return JSON.stringify(value) ?? '';
 }
 
 function emittedBytes(value: unknown): number {
@@ -201,7 +209,7 @@ function safeOwner(owner: string): string {
 }
 
 function encodeCursor(state: Record<string, unknown>): string {
-  const payload = Buffer.from(JSON.stringify(state));
+  const payload = Buffer.from(JSON.stringify({ v: 2, ...state }));
   const signature = createHmac('sha256', cursorKey).update(payload).digest();
   return Buffer.concat([payload, signature]).toString('base64url');
 }
@@ -219,7 +227,11 @@ function decodeCursor(cursor: string): Record<string, any> {
       'issued them; if the server restarted, restart the query without a cursor.',
     );
   }
-  return JSON.parse(payload.toString('utf8')) as Record<string, any>;
+  const decoded = JSON.parse(payload.toString('utf8')) as Record<string, any>;
+  if (decoded.v !== 2) {
+    throw new ArtifactHandleError('invalid_cursor', 'Artifact cursor uses an unsupported response contract version');
+  }
+  return decoded;
 }
 
 function escapeToken(token: string): string {
@@ -502,37 +514,49 @@ function shapeOf(container: unknown, keyLimit: number): KeyShape[] {
 }
 
 /** Shape at a path without values; array item keys are merged across a sample. */
-function describeSelection(selected: unknown, keyLimit = 60, sampleSize = 20): Record<string, unknown> {
+function describeSelection(
+  selected: unknown,
+  responsePath: string,
+  offset: number,
+  pageSize: number,
+  sampleSize = 20,
+): { shape: Record<string, unknown>; total: number; returned: number } {
   const type = jsonType(selected);
   if (Array.isArray(selected)) {
     const merged = new Map<string, KeyShape>();
     for (const item of selected.slice(0, sampleSize)) {
-      for (const shape of shapeOf(item, keyLimit)) {
+      for (const shape of shapeOf(item, Number.MAX_SAFE_INTEGER)) {
         if (!merged.has(shape.name)) merged.set(shape.name, shape);
       }
     }
-    return {
+    const keys = Array.from(merged.values());
+    const page = keys.slice(offset, offset + pageSize);
+    return { shape: {
       type,
       length: selected.length,
       sampled_items: Math.min(selected.length, sampleSize),
       item_type: selected.length ? jsonType(selected[0]) : null,
-      item_keys: Array.from(merged.values()),
+      item_keys: page,
       note: 'item_keys pointers are relative to each item — use them for filters[].path and fields.',
-    };
+    }, total: keys.length, returned: page.length };
   }
   if (selected && typeof selected === 'object') {
-    const keys = Object.keys(selected as Record<string, unknown>);
-    return {
+    const entries = Object.entries(selected as Record<string, unknown>);
+    const page = shapeOf(Object.fromEntries(entries.slice(offset, offset + pageSize)), pageSize)
+      .map(key => ({
+        ...key,
+        pointer: `${responsePath}/${escapeToken(key.name)}`,
+      }));
+    return { shape: {
       type,
-      entry_count: keys.length,
-      keys: shapeOf(selected, keyLimit),
-      truncated_keys: keys.length > keyLimit ? keys.length - keyLimit : 0,
-      note: 'keys pointers are relative to responsePath — append them to reach a value.',
-    };
+      entry_count: entries.length,
+      keys: page,
+      note: 'keys pointers are absolute RFC 6901 pointers from the artifact root.',
+    }, total: entries.length, returned: page.length };
   }
   const shape: Record<string, unknown> = { type };
   if (typeof selected === 'string') shape.length = selected.length;
-  return shape;
+  return { shape, total: 0, returned: 0 };
 }
 
 /** Pointers to the main collections. Bounded walk: arrays sampled at [0], budget capped. */
@@ -920,7 +944,6 @@ export function readResponseArtifact(artifactId: string, cursor: string | undefi
     throw new ArtifactHandleError('invalid_cursor', 'Artifact cursor is past the end of the artifact');
   }
 
-  const reference = artifactReference(artifactId, metadata);
   const build = (chunk: Buffer, nextOffset: number) => {
     const nextCursor = nextOffset < total
       ? encodeCursor({ artifactId, offset: nextOffset, owner: safeOwner(owner) })
@@ -931,13 +954,13 @@ export function readResponseArtifact(artifactId: string, cursor: string | undefi
       offset,
       text: chunk.toString('utf8'),
       response_meta: {
+        contract_version: 2,
         truncated: nextCursor !== null,
         truncation_reason: nextCursor ? 'artifact_page' : null,
         returned_count: chunk.length,
         total_count: total,
         next_cursor: nextCursor,
         serialized_bytes: 0,
-        artifact: reference,
         page_unit: 'bytes' as const,
         source_truncated: metadata.source_truncated ?? false,
         ...completionMetadata(nextCursor !== null, chunk.length, total, offset),
@@ -990,6 +1013,7 @@ export function queryResponseArtifact(
   cursor: string | undefined,
   owner: string,
   describe = false,
+  objectMode?: 'entries',
 ): unknown {
   if (!Number.isInteger(pageSize) || pageSize < 1 || pageSize > MAX_PAGE_SIZE) {
     throw new Error(`pageSize must be an integer between 1 and ${MAX_PAGE_SIZE}`);
@@ -1007,31 +1031,67 @@ export function queryResponseArtifact(
 
   const { dataPath, metadata } = loadMetadata(artifactId, owner);
   const document = loadDocument(artifactId, dataPath);
-  const reference = artifactReference(artifactId, metadata);
   const sourceTruncated = metadata.source_truncated ?? false;
 
   let selected = pointer(document, responsePath);
 
   if (describe) {
+    if (fields?.length || filters?.length) {
+      throw new Error('describe cannot be combined with fields or filters');
+    }
+    if (objectMode !== undefined) {
+      throw new Error('describe cannot be combined with objectMode');
+    }
+    const viewHash = createHash('sha256').update(encode({
+      contractVersion: 2,
+      artifactId,
+      responsePath,
+      describe: true,
+      pageSize,
+    })).digest('hex');
+    let offset = 0;
+    if (cursor) {
+      const decoded = decodeCursor(cursor);
+      if (decoded.owner !== safeOwner(owner) || decoded.artifactId !== artifactId || decoded.viewHash !== viewHash) {
+        throw new ArtifactHandleError('invalid_cursor', 'Artifact shape cursor does not match this artifact, scope, path, or page size');
+      }
+      offset = decoded.offset;
+    }
+    const described = describeSelection(selected, responsePath, offset, pageSize);
+    if (offset > described.total) {
+      throw new ArtifactHandleError('invalid_cursor', 'Artifact shape cursor is past the end of the selection');
+    }
+    const nextOffset = offset + described.returned;
+    const nextCursor = nextOffset < described.total
+      ? encodeCursor({ artifactId, owner: safeOwner(owner), viewHash, offset: nextOffset })
+      : null;
     const result = {
       artifact_id: artifactId,
       response_path: responsePath,
-      describe: true,
-      response: describeSelection(selected),
+      shape: described.shape,
       response_meta: {
-        truncated: false,
-        truncation_reason: null,
-        returned_count: null,
-        total_count: null,
-        next_cursor: null,
+        contract_version: 2,
+        truncated: nextCursor !== null,
+        truncation_reason: nextCursor ? 'page_limit' : null,
+        returned_count: described.returned,
+        total_count: described.total,
+        next_cursor: nextCursor,
         serialized_bytes: 0,
-        artifact: reference,
+        page_unit: 'entries' as const,
         source_truncated: sourceTruncated,
-        ...completionMetadata(false, null, null),
+        ...completionMetadata(nextCursor !== null, described.returned, described.total, offset),
       } satisfies ResponseMeta,
     };
     result.response_meta.serialized_bytes = emittedBytes(result);
     return result;
+  }
+
+  if (objectMode !== undefined) {
+    if (objectMode !== 'entries') throw new Error(`Unsupported objectMode: ${objectMode}`);
+    if (!selected || typeof selected !== 'object' || Array.isArray(selected)) {
+      throw new Error(`objectMode=entries requires responsePath to select a JSON object, but it selects ${jsonType(selected)}`);
+    }
+    selected = Object.entries(selected as Record<string, unknown>).map(([key, value]) => ({ key, value }));
   }
 
   let filterStats: FilterStat[] | undefined;
@@ -1055,8 +1115,10 @@ export function queryResponseArtifact(
   }
 
   const viewHash = createHash('sha256').update(encode({
+    contractVersion: 2,
     artifactId,
     responsePath,
+    objectMode: objectMode ?? null,
     fields: fields ?? null,
     filters: filters ?? null,
     pageSize,
@@ -1110,13 +1172,13 @@ export function queryResponseArtifact(
   if (selection.kind === 'scalar') {
     const build = (response: unknown, truncated: boolean) => {
       const meta: ResponseMeta = {
+        contract_version: 2,
         truncated,
         truncation_reason: truncated ? 'scalar_size_limit' : null,
         returned_count: null,
         total_count: null,
         next_cursor: null,
         serialized_bytes: 0,
-        artifact: reference,
         source_truncated: sourceTruncated,
         ...completionMetadata(truncated, null, null),
       };
@@ -1148,13 +1210,13 @@ export function queryResponseArtifact(
   const build = (response: unknown, returnedCount: number, nextCursor: string | null, truncationReason: string | null) => {
     const truncated = nextCursor !== null || truncationReason !== null;
     const meta: ResponseMeta = {
+      contract_version: 2,
       truncated,
       truncation_reason: truncationReason,
       returned_count: returnedCount,
       total_count: totalCount,
       next_cursor: nextCursor,
       serialized_bytes: 0,
-      artifact: reference,
       page_unit: pageUnit,
       source_truncated: sourceTruncated,
       ...completionMetadata(truncated, returnedCount, totalCount, offset),
@@ -1265,6 +1327,7 @@ export function boundToolResult(toolName: string, value: unknown, owner: string)
       : true,
     data: compactToolValue(toolName, value) as unknown,
     response_meta: {
+      contract_version: 2,
       truncated: true,
       truncation_reason: 'size_limit',
       returned_count: null,
@@ -1282,8 +1345,8 @@ export function boundToolResult(toolName: string, value: unknown, owner: string)
       `read_response_artifact only as a raw byte fallback.`,
   };
 
-  if (emittedBytes(bounded) > INLINE_RESULT_BYTES) {
-    bounded.data = compactToBudget(bounded.data, INLINE_RESULT_BYTES, compacted => ({ ...bounded, data: compacted }));
+  if (emittedBytes(bounded) > PREVIEW_RESULT_BYTES) {
+    bounded.data = compactToBudget(bounded.data, PREVIEW_RESULT_BYTES, compacted => ({ ...bounded, data: compacted }));
   }
   bounded.response_meta.serialized_bytes = emittedBytes(bounded);
   if (emittedBytes(bounded) > HARD_RESULT_BYTES) {

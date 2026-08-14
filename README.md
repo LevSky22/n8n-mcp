@@ -69,13 +69,18 @@ Want to use n8n-MCP with your n8n instance? Check out our comprehensive [n8n Dep
 
 ### Bounded MCP responses
 
-Tool results stay inline up to a conservative 32 KiB budget. Larger workflow,
+Compact JSON tool results stay inline up to a conservative 32 KiB budget. Larger workflow,
 execution, documentation, and host-injected tool results return a compact
-summary plus `response_meta.artifact`. Prefer `query_response_artifact` to
+preview capped at 8 KiB plus `response_meta.artifact`. Prefer `query_response_artifact` to
 select, filter, project, and paginate structured JSON without loading the full
 artifact into model context; `read_response_artifact` remains a raw 24 KiB page
 fallback. Artifact query paths use RFC 6901, while projected fields accept
-either root names such as `id` or pointers such as `/status/name`. The full serialized MCP result is capped at
+either root names such as `id` or pointers such as `/status/name`. Use
+`objectMode: "entries"` to query keyed objects (including native n8n connection
+maps) as `{key, value}` rows; filters can then select several keys in one call.
+`describe: true` pages shape metadata and returns absolute child pointers for
+objects. Query and read pages use response contract version 2 and do not repeat
+the full artifact descriptor minted by the originating tool. The full serialized MCP result is capped at
 128 KiB, artifacts are capped at 50 MiB, expire after 24 hours, and are pruned
 at a 1 GiB quota.
 
