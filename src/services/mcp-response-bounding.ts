@@ -138,15 +138,15 @@ export const queryResponseArtifactTool = {
     'fields accepts root names such as id or pointers such as /status/name. Arrays page by element and ' +
     'objects page by entry. For keyed maps such as n8n connections, set objectMode="entries" and filter ' +
     'on /key rather than guessing nested array paths. Shape descriptions are pageable. Follow next_cursor ' +
-    'until it is null. At the artifact root, fields or filters may infer exactly one array child; ' +
-    'response_meta.inferred_response_path reports it, while ambiguous shapes require an explicit path. ' +
+    'until it is null. On any selected object, fields or filters may infer exactly one array child; ' +
+    'response_meta.inferred_response_path reports its full pointer, while ambiguous shapes require a more specific path. ' +
     'Artifact handles are valid until the ' +
     'MCP server restarts, and at most 24 hours; an unknown handle means you should re-run the originating tool.',
   inputSchema: {
     type: 'object',
     properties: {
       artifactId: { type: 'string', description: 'Opaque artifact id returned in response_meta.artifact.id' },
-      responsePath: { type: 'string', description: 'RFC 6901 pointer selecting the value to query; use an empty string for the artifact root. Root-level fields or filters infer a child only when exactly one array is present.' },
+      responsePath: { type: 'string', description: 'RFC 6901 pointer selecting the value to query; use an empty string for the artifact root. Fields or filters infer a child only when the selected object contains exactly one array.' },
       describe: {
         type: 'boolean',
         description: 'Return the shape at responsePath (types, key names, array lengths) instead of values. Use this first when you do not know the structure.',
@@ -292,6 +292,10 @@ function singleArrayChild(value: unknown): { path: string; value: unknown[] } | 
   if (arrays.length !== 1) return undefined;
   const [key, child] = arrays[0];
   return { path: `/${escapeToken(key)}`, value: child };
+}
+
+function joinResponsePath(base: string, child: string): string {
+  return `${base}${child}`;
 }
 
 function jsonType(value: unknown): string {
@@ -1115,14 +1119,14 @@ export function queryResponseArtifact(
     if (Array.isArray(selected)) {
       selectedArray = selected;
     } else {
-      const inferred = responsePath === '' ? singleArrayChild(selected) : undefined;
+      const inferred = singleArrayChild(selected);
       if (!inferred) {
         throw new Error(
           `filters require responsePath to select a JSON array, but ${responsePath || '/'} selects ` +
           `${jsonType(selected)}. Use describe=true to find an array path.`,
         );
       }
-      inferredResponsePath = inferred.path;
+      inferredResponsePath = joinResponsePath(responsePath, inferred.path);
       selectedArray = inferred.value;
     }
     const applied = applyFilters(selectedArray, filters);
@@ -1136,10 +1140,10 @@ export function queryResponseArtifact(
     try {
       projected = projectSelection(selected, fields);
     } catch (error) {
-      const inferred = responsePath === '' && error instanceof Error &&
-        error.message.includes('fields matched no properties') ? singleArrayChild(selected) : undefined;
+      const inferred = error instanceof Error && error.message.includes('fields matched no properties')
+        ? singleArrayChild(selected) : undefined;
       if (!inferred) throw error;
-      inferredResponsePath = inferred.path;
+      inferredResponsePath = joinResponsePath(responsePath, inferred.path);
       selected = inferred.value;
       projected = projectSelection(selected, fields);
     }

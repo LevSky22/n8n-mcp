@@ -444,6 +444,17 @@ describe('MCP response bounding', () => {
     )).toThrow('matched no properties');
   });
 
+  it('infers below an explicit envelope path and reports the full pointer', () => {
+    const artifact = persistResponseArtifact(
+      { data: { executions: [{ id: 'one' }], returned: 1 } }, 'tenant-a',
+    );
+    const projected = queryResponseArtifact(
+      artifact.id, '/data', ['id'], undefined, 20, undefined, 'tenant-a',
+    ) as any;
+    expect(projected.response).toEqual([{ id: 'one' }]);
+    expect(projected.response_meta.inferred_response_path).toBe('/data/executions');
+  });
+
   it('binds structured query cursors to artifact, scope, and exact view', () => {
     const firstArtifact = persistResponseArtifact({ rows: [1, 2, 3] }, 'tenant-a');
     // Distinct content: artifact ids are content-addressed per scope, so identical
