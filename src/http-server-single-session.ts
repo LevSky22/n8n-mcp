@@ -92,6 +92,56 @@ export function createDualEraStatelessMcpHandler(
   };
 }
 
+// Interval between SSE keep-alive comment frames on the Streamable HTTP
+// transport's open streams — the legacy SSEServerTransport path below has no
+// equivalent option. The frames are what keep an idle GET stream, or a POST
+// stream held open through a long tool call, from being closed by a reverse
+// proxy or an idle timeout, which reaches the client as
+// `SSE stream disconnected: TypeError: terminated`.
+//
+// 15s is the SDK's own default, set explicitly so the behavior is visible here
+// and does not move with a future change to that default.
+const STREAMABLE_HTTP_KEEP_ALIVE_MS = 15_000;
+
+// The JSON-RPC surface this server implements, as exact method names plus
+// namespace prefixes. Gating on the namespace rather than an exact method list
+// means a method added inside a namespace we already serve keeps reaching the
+// SDK instead of being rejected as unknown while the surface drifts.
+// Namespaces cover every request and notification defined by
+// @modelcontextprotocol/sdk 1.30.0; tests/unit/http-server/method-not-found.test.ts
+// fails if a later SDK introduces one outside them.
+//
+// The cost of that choice: an unregistered method inside an accepted namespace
+// (`tools/not-real`) is admitted rather than answered -32601 here. With a
+// session it still gets -32601, from the SDK's own dispatch; without one it
+// falls through to the session error. No client probes that way — the probe
+// this guard exists for is `server/discover` — and narrowing to an exact list
+// would trade this corner for falsely rejecting the next method the SDK adds.
+const IMPLEMENTED_MCP_METHODS = new Set(['initialize', 'ping']);
+const IMPLEMENTED_MCP_METHOD_PREFIXES = [
+  'tools/',
+  'resources/',
+  'prompts/',
+  'completion/',
+  'logging/',
+  'notifications/',
+  'sampling/',
+  'roots/',
+  'elicitation/',
+  'tasks/',
+];
+
+/**
+ * Whether `method` falls inside the surface described by the two lists above.
+ * Exported so tests can assert the surface without driving a request through.
+ */
+export function isImplementedMcpMethod(method: string): boolean {
+  return (
+    IMPLEMENTED_MCP_METHODS.has(method) ||
+    IMPLEMENTED_MCP_METHOD_PREFIXES.some(prefix => method.startsWith(prefix))
+  );
+}
+
 interface SessionMetrics {
   totalSessions: number;
   activeSessions: number;
@@ -322,7 +372,86 @@ export class SingleSessionHTTPServer {
     }
     return isSingleNotification(body);
   }
-  
+
+  /**
+   * Answer methods outside the implemented JSON-RPC surface with -32601, before
+   * any session or tenant handling touches the request.
+   *
+   * The session check used to run first, so an unimplemented method came back as
+   * a session error (-32000, "No valid session ID provided and not an initialize
+   * request"). Clients speaking MCP revision 2026-07-28 probe every remote server
+   * with a session-less `server/discover` and read -32601 as "this server is
+   * 2025-era", which is what makes them fall back to the `initialize` handshake.
+   * Without it they cannot classify the server, re-probe until their retry
+   * counter runs out, and disable the connector (#994).
+   *
+   * The status code depends on whether a session id is present. The 2026-07-28
+   * Streamable HTTP spec asks for 404 alongside -32601, but to a 2025-era client
+   * a 404 on a request that carries `Mcp-Session-Id` means "session gone,
+   * re-initialize", so answering 404 there would provoke a needless teardown.
+   * Both branches carry -32601, which is what clients key on.
+   *
+   * @returns true when the request has been answered and must not be processed further
+   */
+  private handleUnimplementedMethod(req: express.Request, res: express.Response): boolean {
+    // Only single objects are classified here. Batches — removed from MCP in
+    // revision 2025-06-18 — and non-object bodies fall through to the existing
+    // handling unchanged.
+    const body = req.body;
+    if (!body || typeof body !== 'object' || Array.isArray(body)) return false;
+
+    const { jsonrpc, method, id } = body as {
+      jsonrpc?: unknown;
+      method?: unknown;
+      id?: unknown;
+    };
+
+    // A body that asserts a different JSON-RPC version is not ours to answer.
+    // A body that simply omits the member still is: "the client never sees
+    // -32601" is the whole of #994, and answering it is inert — no session is
+    // touched, no state written, no outbound request made — so there is nothing
+    // to be gained by withholding it from a client that sends a minimal probe.
+    if (jsonrpc !== undefined && jsonrpc !== '2.0') return false;
+    if (typeof method !== 'string' || isImplementedMcpMethod(method)) return false;
+
+    // A response is already on the wire, so there is nothing left to answer;
+    // report the request handled rather than writing to it twice.
+    if (res.headersSent) return true;
+
+    // The body limit is 10mb, so the method is caller-controlled and unbounded.
+    // Truncate before it reaches the log or the response.
+    const safeMethod = method.length > 128 ? `${method.slice(0, 128)}…` : method;
+
+    // Notifications carry no id, so there is no response channel to put an error on.
+    if (this.isJsonRpcNotification(body)) {
+      logger.info('Unimplemented JSON-RPC notification ignored', { method: safeMethod });
+      res.status(202).end();
+      return true;
+    }
+
+    const sessionId = req.headers['mcp-session-id'] as string | undefined;
+    logger.info('Unimplemented JSON-RPC method', { method: safeMethod, hasSessionId: !!sessionId });
+
+    if (!sessionId && res.locals) {
+      // Exempt this one response from the auth limiter's failure count. The
+      // limiter only skips responses below 400 (#265), so without this the 404
+      // branch — the steady-state answer to every new client's first probe —
+      // spends one of the 20 tokens per 15 minutes that all users share behind
+      // a proxy when TRUST_PROXY is unset. Set only here, on the 404 branch.
+      res.locals.mcpMethodNotFound = true;
+    }
+
+    res.status(sessionId ? 200 : 404).json({
+      jsonrpc: '2.0',
+      error: {
+        code: -32601,
+        message: `Method not found: ${safeMethod}`
+      },
+      id: id ?? null
+    });
+    return true;
+  }
+
   /**
    * Sanitize error information for client responses
    */
@@ -583,6 +712,14 @@ export class SingleSessionHTTPServer {
     // Wrap all operations to prevent console interference
     return this.consoleManager.wrapOperation(async () => {
       try {
+        // An unimplemented method needs neither a session nor an instance
+        // context, so it is answered before either is looked at (#994). The
+        // POST /mcp route runs the same guard earlier; this call covers
+        // embedders that reach handleRequest directly (see mcp-engine.ts).
+        if (this.handleUnimplementedMethod(req, res)) {
+          return;
+        }
+
         // SECURITY (GHSA-4ggg-h7ph-26qr): validate instance-supplied URL.
         if (instanceContext?.n8nApiUrl) {
           const { SSRFProtection } = await import('./utils/ssrf-protection');
@@ -641,7 +778,7 @@ export class SingleSessionHTTPServer {
                 code: -32000,
                 message: `Session limit reached (${MAX_SESSIONS}). Please wait for existing sessions to expire.`
               },
-              id: req.body?.id || null
+              id: req.body?.id ?? null
             });
             return;
           }
@@ -718,6 +855,7 @@ export class SingleSessionHTTPServer {
 
           transport = new NodeStreamableHTTPServerTransport({
             sessionIdGenerator: () => sessionIdToUse,
+            keepAliveMs: STREAMABLE_HTTP_KEEP_ALIVE_MS,
             onsessioninitialized: (initializedSessionId: string) => {
               // Store both transport and server by session ID when session is initialized
               logger.info('handleRequest: Session initialized, storing transport and server', { 
@@ -769,7 +907,7 @@ export class SingleSessionHTTPServer {
                 code: -32602,
                 message: 'Invalid session ID format'
               },
-              id: req.body?.id || null
+              id: req.body?.id ?? null
             });
             return;
           }
@@ -786,7 +924,7 @@ export class SingleSessionHTTPServer {
                 code: -32000,
                 message: 'Session uses SSE transport. Send messages to POST /messages?sessionId=<id> instead.'
               },
-              id: req.body?.id || null
+              id: req.body?.id ?? null
             });
             return;
           }
@@ -804,7 +942,7 @@ export class SingleSessionHTTPServer {
             res.status(404).json({
               jsonrpc: '2.0',
               error: { code: -32000, message: 'Session not found or expired' },
-              id: req.body?.id || null,
+              id: req.body?.id ?? null,
             });
             return;
           }
@@ -859,7 +997,7 @@ export class SingleSessionHTTPServer {
               code: -32000,
               message: errorMessage
             },
-            id: req.body?.id || null
+            id: req.body?.id ?? null
           });
           return;
         }
@@ -901,7 +1039,7 @@ export class SingleSessionHTTPServer {
                 code: sanitizedError.code
               }
             },
-            id: req.body?.id || null
+            id: req.body?.id ?? null
           });
         }
       }
@@ -1081,6 +1219,13 @@ export class SingleSessionHTTPServer {
       standardHeaders: true, // Return rate limit info in `RateLimit-*` headers
       legacyHeaders: false, // Disable `X-RateLimit-*` headers
       skipSuccessfulRequests: true, // Only count failed auth attempts (#617)
+      // A "method not found" answer is a correct protocol response, not a failed
+      // authentication attempt, but it carries 404 on the session-less branch and
+      // the default predicate counts anything at or above 400. The guard that
+      // emits it runs after authentication, so an unauthenticated caller can
+      // never reach it and this cannot help a brute-forcer (#994, #265).
+      requestWasSuccessful: (_req: express.Request, res: express.Response) =>
+        res.statusCode < 400 || res.locals?.mcpMethodNotFound === true,
       handler: (req, res) => {
         logger.warn('Rate limit exceeded', {
           ip: req.ip,
@@ -1296,7 +1441,7 @@ export class SingleSessionHTTPServer {
         res.status(400).json({
           jsonrpc: '2.0',
           error: { code: -32602, message: 'Missing sessionId query parameter' },
-          id: req.body?.id || null
+          id: req.body?.id ?? null
         });
         return;
       }
@@ -1307,7 +1452,7 @@ export class SingleSessionHTTPServer {
         res.status(400).json({
           jsonrpc: '2.0',
           error: { code: -32000, message: 'SSE session not found or expired' },
-          id: req.body?.id || null
+          id: req.body?.id ?? null
         });
         return;
       }
@@ -1323,7 +1468,7 @@ export class SingleSessionHTTPServer {
           res.status(500).json({
             jsonrpc: '2.0',
             error: { code: -32603, message: 'Internal error processing SSE message' },
-            id: req.body?.id || null
+            id: req.body?.id ?? null
           });
         }
       }
@@ -1444,6 +1589,11 @@ export class SingleSessionHTTPServer {
         body: summarizeMcpBody(req.body),
         activeSessions: this.getActiveSessionCount()
       });
+
+      // Answer unimplemented methods ahead of the multi-tenant header check: a
+      // probe such as `server/discover` carries no tenant headers, and rejecting
+      // it as a missing-tenant error would hide the -32601 the client waits for.
+      if (this.handleUnimplementedMethod(req, res)) return;
 
       // Extract instance context from headers if present (for multi-tenant support)
       let instanceContext: InstanceContext | undefined;

@@ -54,6 +54,30 @@ import { telemetry } from '../telemetry';
 import { EarlyErrorLogger } from '../telemetry/early-error-logger';
 import { STARTUP_CHECKPOINTS } from '../telemetry/startup-checkpoints';
 
+// Largest single inbound JSON-RPC message the stdio transport will buffer.
+//
+// @modelcontextprotocol/sdk 1.30.0 introduced a cap here where there was none,
+// defaulting to 10 MB, and the failure mode is not a tool error the client can
+// report — the transport emits an error and closes, so the session dies. stdio
+// is a local pipe to the user's own MCP client rather than an untrusted network
+// caller, so the case for a tight bound is weaker than on HTTP, while the cost
+// of tripping it is higher: the session dies before any tool call can report
+// what happened, and on the npx path the user's machine has the version cached,
+// so a fix reaches them slowly. 64 MB keeps a backstop against a stream that
+// never terminates a message, with room well above any workflow body the
+// bundled template corpus suggests is realistic.
+//
+// The ceiling is not a memory ceiling. The SDK accumulates with
+// Buffer.concat([existing, chunk]), so a message approaching the limit holds
+// roughly twice its size while the buffers overlap, and the parsed object then
+// coexists with the string it was parsed from. A container sized well below
+// that should lower this rather than inherit it, which is what the env override
+// is for — the default suits the desktop and npx case the limit was raised for.
+const STDIO_MAX_BUFFER_SIZE = Math.max(
+  1024 * 1024,
+  parseInt(process.env.N8N_MCP_STDIO_MAX_BUFFER_SIZE || '', 10) || 64 * 1024 * 1024
+);
+
 /**
  * Escape a string for safe use as a literal inside `new RegExp(...)`.
  *
@@ -4845,7 +4869,31 @@ Full documentation is being prepared. For now, use get_node_essentials for confi
     // Ensure database is initialized before starting server
     await this.ensureInitialized();
 
-    const transport = new StdioServerTransport();
+    const transport = new StdioServerTransport(process.stdin, process.stdout, {
+      maxBufferSize: STDIO_MAX_BUFFER_SIZE,
+    });
+
+    // Without a handler the buffer cap trips silently: the SDK reports through
+    // onerror and closes, and the user sees the session vanish with nothing to
+    // put in a bug report.
+    //
+    // This writes to stderr directly rather than through the logger, because on
+    // the npx path — the one this diagnostic exists for — the logger produces
+    // nothing: stdio-wrapper.ts sets DISABLE_CONSOLE_OUTPUT, which makes
+    // logger.error() return before writing, and installs the guard with
+    // silenceConsole, which replaces console.error with a no-op. stderr is the
+    // channel the guard itself redirects non-JSON-RPC output to, and the one
+    // Claude Desktop persists to mcp-server-*.log, so it reaches a bug report
+    // without touching the JSON-RPC stream on stdout.
+    //
+    // Assigned before connect(): the SDK chains an existing onerror ahead of its
+    // own, so moving this below the connect() call would replace its error
+    // propagation rather than add to it.
+    transport.onerror = (error: Error) => {
+      const detail = error?.stack ?? error?.message ?? String(error);
+      process.stderr.write(`[ERROR] stdio transport error: ${detail}\n`);
+    };
+
     await this.server.connect(transport);
     
     // Force flush stdout for Docker environments

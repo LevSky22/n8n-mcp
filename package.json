@@ -1,6 +1,6 @@
 {
   "name": "n8n-mcp",
-  "version": "2.69.0",
+  "version": "2.69.2",
   "description": "Integration between n8n workflow automation and Model Context Protocol (MCP)",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -162,7 +162,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/node": "^2.0.0",
-    "@modelcontextprotocol/sdk": "1.28.0",
+    "@modelcontextprotocol/sdk": "1.30.0",
     "@modelcontextprotocol/server": "^2.0.0",
     "@modelcontextprotocol/server-legacy": "^2.0.0",
     "@n8n/n8n-nodes-langchain": "2.32.4",
