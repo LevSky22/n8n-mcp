@@ -560,7 +560,7 @@ describe('MCP response bounding', () => {
     )).toThrow('matched no properties');
     expect(() => queryResponseArtifact(
       artifact.id, '/record', undefined, [{ path: '/id', op: 'eq', value: 1 }], 20, undefined, 'tenant-a',
-    )).toThrow('select a JSON array');
+    )).toThrow('objectMode="entries"');
 
     const scalar = queryResponseArtifact(
       artifact.id, '/record/id', undefined, undefined, 20, undefined, 'tenant-a',

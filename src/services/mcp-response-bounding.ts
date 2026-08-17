@@ -1121,9 +1121,12 @@ export function queryResponseArtifact(
     } else {
       const inferred = singleArrayChild(selected);
       if (!inferred) {
+        const objectHint = selected && typeof selected === 'object' && !Array.isArray(selected)
+          ? ' For keyed maps, set objectMode="entries" to expose {key,value} rows before filtering.'
+          : '';
         throw new Error(
           `filters require responsePath to select a JSON array, but ${responsePath || '/'} selects ` +
-          `${jsonType(selected)}. Use describe=true to find an array path.`,
+          `${jsonType(selected)}.${objectHint} Use describe=true to inspect the selected shape.`,
         );
       }
       inferredResponsePath = joinResponsePath(responsePath, inferred.path);
