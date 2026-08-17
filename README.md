@@ -75,7 +75,11 @@ summary plus `response_meta.artifact`. Prefer `query_response_artifact` to
 select, filter, project, and paginate structured JSON without loading the full
 artifact into model context; `read_response_artifact` remains a raw 24 KiB page
 fallback. Artifact query paths use RFC 6901, while projected fields accept
-either root names such as `id` or pointers such as `/status/name`. The full serialized MCP result is capped at
+either root names such as `id` or pointers such as `/status/name`. When fields
+or filters target the artifact root and it contains exactly one array child,
+the query selects that collection and reports its pointer as
+`response_meta.inferred_response_path`; ambiguous roots still require an
+explicit path. The full serialized MCP result is capped at
 128 KiB, artifacts are capped at 50 MiB, expire after 24 hours, and are pruned
 at a 1 GiB quota.
 

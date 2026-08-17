@@ -66,6 +66,8 @@ export interface ResponseMeta {
   source_truncated?: boolean;
   filters_applied?: FilterStat[];
   fields_resolved?: Record<string, number>;
+  /** Unambiguous one-level array selected structurally when the caller queried the root. */
+  inferred_response_path?: string;
 }
 
 export interface ArtifactReference {
@@ -133,13 +135,15 @@ export const queryResponseArtifactTool = {
     'preview is a reshaped summary, so pointers copied from it may not exist in the artifact ' +
     '(response_meta.artifact.primary_paths lists pointers that do). responsePath uses RFC 6901. ' +
     'fields accepts root names such as id or pointers such as /status/name. Arrays page by element and ' +
-    'objects page by entry; follow next_cursor until it is null. Artifact handles are valid until the ' +
+    'objects page by entry. At the artifact root, fields or filters may infer exactly one array child; ' +
+    'response_meta.inferred_response_path reports it, while ambiguous shapes require an explicit path. ' +
+    'Follow next_cursor until it is null. Artifact handles are valid until the ' +
     'MCP server restarts, and at most 24 hours; an unknown handle means you should re-run the originating tool.',
   inputSchema: {
     type: 'object',
     properties: {
       artifactId: { type: 'string', description: 'Opaque artifact id returned in response_meta.artifact.id' },
-      responsePath: { type: 'string', description: 'RFC 6901 pointer selecting the value to query; use an empty string for the artifact root' },
+      responsePath: { type: 'string', description: 'RFC 6901 pointer selecting the value to query; use an empty string for the artifact root. Root-level fields or filters infer a child only when exactly one array is present.' },
       describe: {
         type: 'boolean',
         description: 'Return the shape at responsePath (types, key names, array lengths) instead of values. Use this first when you do not know the structure.',
@@ -266,6 +270,16 @@ function describeAvailableKeys(sample: unknown): string {
     return shown.length ? shown.join(', ') + (keys.length > shown.length ? `, … (${keys.length} total)` : '') : '(no properties)';
   }
   return `a ${sample === null ? 'null' : typeof sample} value with no properties`;
+}
+
+/** Select a one-level collection only when its shape is unambiguous. */
+function singleArrayChild(value: unknown): { path: string; value: unknown[] } | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const arrays = Object.entries(value as Record<string, unknown>)
+    .filter((entry): entry is [string, unknown[]] => Array.isArray(entry[1]));
+  if (arrays.length !== 1) return undefined;
+  const [key, child] = arrays[0];
+  return { path: `/${escapeToken(key)}`, value: child };
 }
 
 function jsonType(value: unknown): string {
@@ -1011,6 +1025,7 @@ export function queryResponseArtifact(
   const sourceTruncated = metadata.source_truncated ?? false;
 
   let selected = pointer(document, responsePath);
+  let inferredResponsePath: string | undefined;
 
   if (describe) {
     const result = {
@@ -1036,20 +1051,38 @@ export function queryResponseArtifact(
 
   let filterStats: FilterStat[] | undefined;
   if (filters?.length) {
-    if (!Array.isArray(selected)) {
-      throw new Error(
-        `filters require responsePath to select a JSON array, but ${responsePath || '/'} selects ` +
-        `${jsonType(selected)}. Use describe=true to find an array path.`,
-      );
+    let selectedArray: unknown[];
+    if (Array.isArray(selected)) {
+      selectedArray = selected;
+    } else {
+      const inferred = responsePath === '' ? singleArrayChild(selected) : undefined;
+      if (!inferred) {
+        throw new Error(
+          `filters require responsePath to select a JSON array, but ${responsePath || '/'} selects ` +
+          `${jsonType(selected)}. Use describe=true to find an array path.`,
+        );
+      }
+      inferredResponsePath = inferred.path;
+      selectedArray = inferred.value;
     }
-    const applied = applyFilters(selected, filters);
+    const applied = applyFilters(selectedArray, filters);
     selected = applied.kept;
     filterStats = applied.stats;
   }
 
   let fieldsResolved: Record<string, number> | undefined;
   if (fields?.length) {
-    const projected = projectSelection(selected, fields);
+    let projected: ReturnType<typeof projectSelection>;
+    try {
+      projected = projectSelection(selected, fields);
+    } catch (error) {
+      const inferred = responsePath === '' && error instanceof Error &&
+        error.message.includes('fields matched no properties') ? singleArrayChild(selected) : undefined;
+      if (!inferred) throw error;
+      inferredResponsePath = inferred.path;
+      selected = inferred.value;
+      projected = projectSelection(selected, fields);
+    }
     selected = projected.value;
     fieldsResolved = projected.resolved;
   }
@@ -1122,6 +1155,7 @@ export function queryResponseArtifact(
       };
       if (filterStats) meta.filters_applied = filterStats;
       if (fieldsResolved) meta.fields_resolved = fieldsResolved;
+      if (inferredResponsePath) meta.inferred_response_path = inferredResponsePath;
       const notes = [...unitWarnings];
       if (truncated) notes.push('The selected value exceeded the inline budget; page it with read_response_artifact.');
       if (notes.length) meta.warning = [meta.warning, ...notes].filter(Boolean).join(' ');
@@ -1161,6 +1195,7 @@ export function queryResponseArtifact(
     };
     if (filterStats) meta.filters_applied = filterStats;
     if (fieldsResolved) meta.fields_resolved = fieldsResolved;
+    if (inferredResponsePath) meta.inferred_response_path = inferredResponsePath;
     const notes = [...unitWarnings];
     if (truncationReason === 'item_size_limit') {
       notes.push(
