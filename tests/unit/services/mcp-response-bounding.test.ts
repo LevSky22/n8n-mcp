@@ -398,6 +398,52 @@ describe('MCP response bounding', () => {
     )).toThrow('matched no properties');
   });
 
+  it('infers one unambiguous array envelope when projecting from the artifact root', () => {
+    const populated = persistResponseArtifact({ fields: [{ id: 'one', name: 'Example' }] }, 'tenant-a');
+    const projected = queryResponseArtifact(
+      populated.id, '', ['id', 'name'], undefined, 20, undefined, 'tenant-a',
+    ) as any;
+    expect(projected.response).toEqual([{ id: 'one', name: 'Example' }]);
+    expect(projected.response_meta.inferred_response_path).toBe('/fields');
+    expect(projected.response_meta.fields_resolved).toEqual({ id: 1, name: 1 });
+
+    const empty = persistResponseArtifact({ fields: [] }, 'tenant-a');
+    const emptyProjection = queryResponseArtifact(
+      empty.id, '', ['id'], undefined, 20, undefined, 'tenant-a',
+    ) as any;
+    expect(emptyProjection.response).toEqual([]);
+    expect(emptyProjection.response_meta.inferred_response_path).toBe('/fields');
+    expect(emptyProjection.response_meta.fields_resolved).toEqual({ id: 0 });
+  });
+
+  it('does not infer a child when a projected root field resolves', () => {
+    const artifact = persistResponseArtifact({ id: 'root', rows: [{ id: 'child' }] }, 'tenant-a');
+    const projected = queryResponseArtifact(
+      artifact.id, '', ['id'], undefined, 20, undefined, 'tenant-a',
+    ) as any;
+    expect(projected.response).toEqual({ id: 'root' });
+    expect(projected.response_meta.inferred_response_path).toBeUndefined();
+  });
+
+  it('infers one array for root filtering and refuses ambiguous envelopes', () => {
+    const filterable = persistResponseArtifact(
+      { rows: [{ kind: 'keep' }, { kind: 'drop' }] }, 'tenant-a',
+    );
+    const filtered = queryResponseArtifact(
+      filterable.id, '', undefined, [{ path: '/kind', op: 'eq', value: 'keep' }],
+      20, undefined, 'tenant-a',
+    ) as any;
+    expect(filtered.response).toEqual([{ kind: 'keep' }]);
+    expect(filtered.response_meta.inferred_response_path).toBe('/rows');
+
+    const ambiguous = persistResponseArtifact(
+      { rows: [{ id: 1 }], errors: [] }, 'tenant-a',
+    );
+    expect(() => queryResponseArtifact(
+      ambiguous.id, '', ['id'], undefined, 20, undefined, 'tenant-a',
+    )).toThrow('matched no properties');
+  });
+
   it('binds structured query cursors to artifact, scope, and exact view', () => {
     const firstArtifact = persistResponseArtifact({ rows: [1, 2, 3] }, 'tenant-a');
     // Distinct content: artifact ids are content-addressed per scope, so identical
