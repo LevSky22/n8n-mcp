@@ -22,7 +22,7 @@ export const queryResponseArtifactDoc: ToolDocumentation = {
       'Call with describe=true first. The inline preview you just read is a reshaped summary, so a pointer copied out of it may not exist in the artifact.',
       'response_meta.artifact.primary_paths lists pointers that do resolve — prefer those over guessing.',
       'Use responsePath: "" for the artifact root.',
-      'At the root, fields or filters infer exactly one array child and report it as response_meta.inferred_response_path; ambiguous shapes still need an explicit responsePath.',
+      'If shaping cannot apply to the selected object, fields or filters infer exactly one array child and report its full pointer as response_meta.inferred_response_path; ambiguous shapes need a more specific responsePath.',
       'Page with cursor until next_cursor is null; a partial page is not the whole answer.',
       'An unknown artifactId means the handle expired or the server restarted — re-run the tool that produced it.'
     ]
@@ -47,7 +47,7 @@ Arrays page by element and objects page by entry.`,
       responsePath: {
         type: 'string',
         required: true,
-        description: 'RFC 6901 pointer selecting the value to query; use an empty string for the artifact root. Root-level fields or filters infer a child only when exactly one array is present.'
+        description: 'RFC 6901 pointer selecting the value to query; use an empty string for the artifact root. Fields or filters may infer one array child below the selected object only when it is unambiguous.'
       },
       describe: {
         type: 'boolean',
@@ -102,7 +102,7 @@ Arrays page by element and objects page by entry.`,
     ],
     pitfalls: [
       'A pointer that worked against the inline preview may not exist in the artifact when filters or fields reshaped that preview',
-      'Root inference is deliberately limited to one array child; with zero or multiple arrays, pass an explicit responsePath',
+      'Inference is deliberately limited to one array child below the selected object; with zero or multiple arrays, pass a more specific responsePath',
       'Artifact handles do not survive an MCP server restart even inside the 24 hour window',
       'Treating one page as the full result: check response_meta before summarising',
       'Artifacts are scoped to the caller that created them'

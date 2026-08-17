@@ -434,6 +434,32 @@ describe('MCP response bounding', () => {
     )).toThrow('matched no properties');
   });
 
+  it('infers an unambiguous array below an explicitly selected object', () => {
+    const artifact = persistResponseArtifact({ payload: { fields: [{ id: 'one', type: 'text' }] } }, 'tenant-a');
+    const projected = queryResponseArtifact(
+      artifact.id, '/payload', ['id', 'type'], undefined, 20, undefined, 'tenant-a',
+    ) as any;
+    expect(projected.response).toEqual([{ id: 'one', type: 'text' }]);
+    expect(projected.response_meta.inferred_response_path).toBe('/payload/fields');
+
+    const filtered = queryResponseArtifact(
+      artifact.id, '/payload', undefined, [{ path: '/type', op: 'eq', value: 'text' }],
+      20, undefined, 'tenant-a',
+    ) as any;
+    expect(filtered.response).toEqual([{ id: 'one', type: 'text' }]);
+    expect(filtered.response_meta.inferred_response_path).toBe('/payload/fields');
+  });
+
+  it('refuses ambiguous arrays below an explicitly selected object', () => {
+    const artifact = persistResponseArtifact(
+      { payload: { fields: [{ id: 'one' }], errors: [] } },
+      'tenant-a',
+    );
+    expect(() => queryResponseArtifact(
+      artifact.id, '/payload', ['id'], undefined, 20, undefined, 'tenant-a',
+    )).toThrow('matched no properties');
+  });
+
   it('binds structured query cursors to artifact, scope, and exact view', () => {
     const firstArtifact = persistResponseArtifact({ rows: [1, 2, 3] }, 'tenant-a');
     // Distinct content: artifact ids are content-addressed per scope, so identical
