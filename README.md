@@ -76,10 +76,10 @@ select, filter, project, and paginate structured JSON without loading the full
 artifact into model context; `read_response_artifact` remains a raw 24 KiB page
 fallback. Artifact query paths use RFC 6901, while projected fields accept
 either root names such as `id` or pointers such as `/status/name`. When fields
-or filters target the artifact root and it contains exactly one array child,
+or filters target an object containing exactly one array child,
 the query selects that collection and reports its pointer as
-`response_meta.inferred_response_path`; ambiguous roots still require an
-explicit path. Use
+`response_meta.inferred_response_path`; ambiguous objects still require a
+more specific path. Use
 `objectMode: "entries"` to query keyed objects (including native n8n connection
 maps) as `{key, value}` rows; filters can then select several keys in one call.
 `describe: true` pages shape metadata and returns absolute child pointers for
