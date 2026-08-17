@@ -53,8 +53,9 @@ const { transportHandleRequest, TransportMock, applyTransportMocks } = vi.hoiste
   return { transportHandleRequest, TransportMock, applyTransportMocks };
 });
 
-vi.mock('@modelcontextprotocol/sdk/server/streamableHttp.js', () => ({
-  StreamableHTTPServerTransport: TransportMock,
+vi.mock('@modelcontextprotocol/node', () => ({
+  NodeStreamableHTTPServerTransport: TransportMock,
+  toNodeHandler: vi.fn(),
 }));
 
 // Capture the options the server passes to express-rate-limit so the real
