@@ -53,8 +53,6 @@ import {
   boundToolResult,
   queryResponseArtifact,
   queryResponseArtifactTool,
-  readResponseArtifact,
-  responseArtifactTool,
   serializeToolText,
 } from '../services/mcp-response-bounding';
 import type { AdditionalTool, AdditionalToolContext } from '../types/additional-tools';
@@ -335,7 +333,6 @@ export class N8NDocumentationMCPServer {
     const builtInToolNames = new Set([
       ...n8nDocumentationToolsFinal.map(tool => tool.name),
       ...n8nManagementTools.map(tool => tool.name),
-      responseArtifactTool.name,
       queryResponseArtifactTool.name,
     ]);
 
@@ -377,7 +374,6 @@ export class N8NDocumentationMCPServer {
     const managementTool = n8nManagementTools.find(t => t.name === name);
     if (managementTool) return managementTool;
 
-    if (name === responseArtifactTool.name) return responseArtifactTool;
     if (name === queryResponseArtifactTool.name) return queryResponseArtifactTool;
     return this.additionalToolsByName.get(name)?.tool;
   }
@@ -873,9 +869,6 @@ export class N8NDocumentationMCPServer {
 
       // Combine documentation tools with management tools if API is configured
       let tools = [...enabledDocTools];
-      if (!disabledTools.has(responseArtifactTool.name)) {
-        tools.push(responseArtifactTool as ToolDefinition);
-      }
       if (!disabledTools.has(queryResponseArtifactTool.name)) {
         tools.push(queryResponseArtifactTool as ToolDefinition);
       }
@@ -1709,14 +1702,6 @@ export class N8NDocumentationMCPServer {
     // Ensure args is an object and validate it
     args = args || {};
 
-    if (name === responseArtifactTool.name) {
-      if (!args.artifactId || typeof args.artifactId !== 'string') {
-        throw new Error('artifactId is required');
-      }
-      const owner = this.instanceContext ? getInstanceScopeId(this.instanceContext) : 'default-instance';
-      return readResponseArtifact(args.artifactId, args.cursor, owner);
-    }
-
     if (name === queryResponseArtifactTool.name) {
       if (!args.artifactId || typeof args.artifactId !== 'string') {
         throw new Error('artifactId is required');
@@ -1735,6 +1720,7 @@ export class N8NDocumentationMCPServer {
         owner,
         args.describe === true,
         args.objectMode,
+        args.textSearch,
       );
     }
 

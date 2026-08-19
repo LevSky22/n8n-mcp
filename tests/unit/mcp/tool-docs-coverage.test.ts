@@ -2,13 +2,13 @@ import { describe, it, expect } from 'vitest';
 import { toolsDocumentation } from '@/mcp/tool-docs';
 import { n8nDocumentationToolsFinal } from '@/mcp/tools';
 import { n8nManagementTools } from '@/mcp/tools-n8n-manager';
-import { queryResponseArtifactTool, responseArtifactTool } from '@/services/mcp-response-bounding';
+import { queryResponseArtifactTool } from '@/services/mcp-response-bounding';
 import { getToolDocumentation, getToolsOverview } from '@/mcp/tools-documentation';
 
 /**
  * The sibling tools-documentation.test.ts mocks @/mcp/tool-docs, so it can verify the
  * lookup logic but never that the registry actually covers the tools we expose. That gap
- * shipped: query_response_artifact and read_response_artifact were fully callable while
+ * shipped: query_response_artifact was fully callable while
  * tools_documentation({topic: 'query_response_artifact'}) answered "not found", because the
  * response-bounding layer registers its wrappers separately from src/mcp/tools.ts.
  *
@@ -19,7 +19,6 @@ const registeredTools = [
   ...n8nDocumentationToolsFinal,
   ...n8nManagementTools,
   queryResponseArtifactTool,
-  responseArtifactTool,
 ];
 
 describe('tool documentation coverage', () => {
@@ -28,7 +27,6 @@ describe('tool documentation coverage', () => {
     expect(n8nDocumentationToolsFinal.length).toBeGreaterThan(0);
     expect(n8nManagementTools.length).toBeGreaterThan(0);
     expect(queryResponseArtifactTool.name).toBe('query_response_artifact');
-    expect(responseArtifactTool.name).toBe('read_response_artifact');
   });
 
   it.each(registeredTools.map((tool) => tool.name))(
@@ -61,16 +59,16 @@ describe('tool documentation coverage', () => {
 
   it('states the real tool count in the overview', () => {
     // The overview said "24 Tools Total" while 26 were exposed, which is how the missing
-    // wrappers stayed invisible to anyone reading the catalogue.
+    // wrapper stayed invisible to anyone reading the catalogue.
     const overview = getToolsOverview('essentials');
     const declared = overview.match(/\((\d+) Tools Total\)/);
     expect(declared, 'overview no longer declares a tool total').not.toBeNull();
     expect(Number(declared![1])).toBe(registeredTools.length);
   });
 
-  it('lists the artifact wrappers in the overview', () => {
+  it('lists only the semantic artifact query in the overview', () => {
     const overview = getToolsOverview('essentials');
     expect(overview).toContain('query_response_artifact');
-    expect(overview).toContain('read_response_artifact');
+    expect(overview).not.toContain('read_response_artifact');
   });
 });

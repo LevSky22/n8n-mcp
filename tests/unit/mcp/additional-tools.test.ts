@@ -257,8 +257,9 @@ describe('Additional tools hook', () => {
     circular.self = circular;
     server.stubExecuteTool(circular);
 
-    const result = await server.simulateToolCallRequest('read_response_artifact', {
+    const result = await server.simulateToolCallRequest('query_response_artifact', {
       artifactId: 'a'.repeat(20),
+      responsePath: '',
     });
 
     expect(result.isError).toBe(true);

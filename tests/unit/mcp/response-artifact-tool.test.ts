@@ -57,32 +57,17 @@ describe('response artifact MCP tool', () => {
     rmSync(root, { recursive: true, force: true });
   });
 
-  it('lists both artifact tools by default and omits each when disabled', async () => {
+  it('lists only the semantic artifact query and omits it when disabled', async () => {
     const enabledServer = new TestableN8NMCPServer();
     const enabled = await enabledServer.testListTools();
-    expect(enabled.tools.map((tool: any) => tool.name)).toContain('read_response_artifact');
+    expect(enabled.tools.map((tool: any) => tool.name)).not.toContain('read_response_artifact');
     expect(enabled.tools.map((tool: any) => tool.name)).toContain('query_response_artifact');
 
-    process.env.DISABLED_TOOLS = 'read_response_artifact,query_response_artifact';
+    process.env.DISABLED_TOOLS = 'query_response_artifact';
     const disabledServer = new TestableN8NMCPServer();
     const disabled = await disabledServer.testListTools();
     expect(disabled.tools.map((tool: any) => tool.name)).not.toContain('read_response_artifact');
     expect(disabled.tools.map((tool: any) => tool.name)).not.toContain('query_response_artifact');
-  });
-
-  it('requires an artifact id', async () => {
-    const server = new TestableN8NMCPServer();
-    await expect(server.testExecuteTool('read_response_artifact', {})).rejects.toThrow(
-      'artifactId is required',
-    );
-  });
-
-  it('resolves the artifact reader schema as a built-in tool', () => {
-    const server = new TestableN8NMCPServer();
-    expect(server.testFindToolSchema('read_response_artifact')).toMatchObject({
-      name: 'read_response_artifact',
-      inputSchema: { required: ['artifactId'] },
-    });
   });
 
   it('resolves the structured artifact query schema as a built-in tool', () => {
@@ -92,32 +77,6 @@ describe('response artifact MCP tool', () => {
       inputSchema: { required: ['artifactId', 'responsePath'] },
       annotations: { readOnlyHint: true, idempotentHint: true },
     });
-  });
-
-  it('reads artifacts in the default instance scope', async () => {
-    const artifact = persistResponseArtifact({ value: 'default' }, 'default-instance');
-    const server = new TestableN8NMCPServer();
-
-    const response = await server.testCallTool('read_response_artifact', { artifactId: artifact.id });
-    const result = JSON.parse(response.content[0].text);
-
-    expect(result.artifact_id).toBe(artifact.id);
-    expect(JSON.parse(result.text)).toEqual({ value: 'default' });
-  });
-
-  it('reads artifacts in the configured tenant scope', async () => {
-    const context: InstanceContext = {
-      n8nApiUrl: 'https://example.n8n.cloud',
-      n8nApiKey: 'api-key',
-      instanceId: 'tenant-a',
-    };
-    const artifact = persistResponseArtifact({ value: 'tenant' }, getInstanceScopeId(context));
-    const server = new TestableN8NMCPServer(context);
-
-    const response = await server.testCallTool('read_response_artifact', { artifactId: artifact.id });
-    const result = JSON.parse(response.content[0].text);
-
-    expect(JSON.parse(result.text)).toEqual({ value: 'tenant' });
   });
 
   it('queries artifacts in the configured tenant scope', async () => {

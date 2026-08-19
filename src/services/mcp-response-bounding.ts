@@ -1,6 +1,6 @@
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'crypto';
 import {
-  existsSync, mkdirSync, openSync, closeSync, readSync, readFileSync, renameSync,
+  existsSync, mkdirSync, openSync, closeSync, readFileSync, renameSync,
   statSync, unlinkSync, writeFileSync, readdirSync, utimesSync,
 } from 'fs';
 import path from 'path';
@@ -18,12 +18,8 @@ function envInt(name: string, fallback: number): number {
 export const INLINE_RESULT_BYTES = envInt('MCP_RESPONSE_INLINE_BYTES', 32 * 1024);
 export const PREVIEW_RESULT_BYTES = envInt('MCP_RESPONSE_PREVIEW_BYTES', 8 * 1024);
 export const HARD_RESULT_BYTES = envInt('MCP_RESPONSE_HARD_BYTES', 128 * 1024);
-export const ARTIFACT_PAGE_BYTES = envInt('MCP_RESPONSE_ARTIFACT_PAGE_BYTES', 24 * 1024);
 export const DEFAULT_PAGE_SIZE = 20;
 export const MAX_PAGE_SIZE = 100;
-// Smallest raw window read_response_artifact will fall back to when JSON escaping
-// inflates a page past the inline budget. Guarantees forward progress.
-const MIN_ARTIFACT_PAGE_BYTES = 512;
 const DEFAULT_ARTIFACT_MAX_BYTES = envInt('MCP_RESPONSE_ARTIFACT_MAX_BYTES', 50 * 1024 * 1024);
 const DEFAULT_ARTIFACT_TTL_MS = envInt('MCP_RESPONSE_ARTIFACT_TTL_MS', 24 * 60 * 60 * 1000);
 const DEFAULT_ARTIFACT_QUOTA_BYTES = envInt('MCP_RESPONSE_ARTIFACT_QUOTA_BYTES', 1024 * 1024 * 1024);
@@ -61,8 +57,8 @@ export interface ResponseMeta {
   serialized_bytes: number;
   artifact?: ArtifactReference | null;
   warning: string | null;
-  /** What returned_count/total_count count: array elements, object entries, or bytes. */
-  page_unit?: 'items' | 'entries' | 'bytes';
+  /** What returned_count/total_count count: array elements or object entries. */
+  page_unit?: 'items' | 'entries';
   /** True when the upstream payload was already reduced before it was stored. */
   source_truncated?: boolean;
   filters_applied?: FilterStat[];
@@ -77,7 +73,6 @@ export interface ArtifactReference {
   byte_length: number;
   sha256: string;
   expires_at: string;
-  read_tool: 'read_response_artifact';
   query_tool: 'query_response_artifact';
   response_root: '/';
   /** Pointers to the artifact's main collections; preview pointers may not exist here. */
@@ -96,27 +91,8 @@ export class ArtifactHandleError extends Error {
   }
 }
 
-export const responseArtifactTool = {
-  name: 'read_response_artifact',
-  description:
-    'Read one raw byte page from a large MCP result artifact. Prefer query_response_artifact for ' +
-    'structured JSON; use this only as a raw fallback. IMPORTANT: a single page is a byte slice and ' +
-    'is NOT valid JSON on its own — concatenate every page in order before parsing. Continue with ' +
-    'response_meta.next_cursor until it is null. Artifact handles are valid until the MCP server ' +
-    'restarts, and at most 24 hours; an unknown handle means you should re-run the originating tool.',
-  inputSchema: {
-    type: 'object',
-    properties: {
-      artifactId: { type: 'string', description: 'Opaque artifact id returned in response_meta.artifact.id' },
-      cursor: { type: 'string', description: 'Opaque next cursor from the previous artifact page' },
-    },
-    required: ['artifactId'],
-  },
-  annotations: { title: 'Read Response Artifact', readOnlyHint: true, idempotentHint: true, openWorldHint: false },
-};
-
 /** Tools that already bound their own replies and must not be bounded again. */
-const SELF_BOUNDED_TOOLS = new Set<string>([responseArtifactTool.name, 'query_response_artifact']);
+const SELF_BOUNDED_TOOLS = new Set<string>(['query_response_artifact']);
 
 const FILTER_OPERATIONS = ['eq', 'ne', 'in', 'contains', 'lt', 'lte', 'gt', 'gte', 'exists'] as const;
 type FilterOperation = typeof FILTER_OPERATIONS[number];
@@ -128,6 +104,11 @@ export interface ResponseFilter {
   value?: unknown;
 }
 
+export interface TextSearch {
+  query: string;
+  caseSensitive?: boolean;
+}
+
 export const queryResponseArtifactTool = {
   name: 'query_response_artifact',
   description:
@@ -137,8 +118,9 @@ export const queryResponseArtifactTool = {
     '(response_meta.artifact.primary_paths lists pointers that do). responsePath uses RFC 6901. ' +
     'fields accepts root names such as id or pointers such as /status/name. Arrays page by element and ' +
     'objects page by entry. For keyed maps such as n8n connections, set objectMode="entries" and filter ' +
-    'on /key rather than guessing nested array paths. Shape descriptions are pageable. Follow next_cursor ' +
-    'until it is null. On any selected object, fields or filters may infer exactly one array child; ' +
+    'on /key rather than guessing nested array paths. Use textSearch for a bounded literal search across ' +
+    'large string values. Shape descriptions and result sets are pageable; request another page only when ' +
+    'the current page did not answer the question. On any selected object, fields or filters may infer exactly one array child; ' +
     'response_meta.inferred_response_path reports its full pointer, while ambiguous shapes require a more specific path. ' +
     'Artifact handles are valid until the ' +
     'MCP server restarts, and at most 24 hours; an unknown handle means you should re-run the originating tool.',
@@ -176,6 +158,16 @@ export const queryResponseArtifactTool = {
           },
           required: ['path'],
         },
+      },
+      textSearch: {
+        type: 'object',
+        additionalProperties: false,
+        description: 'Bounded literal search across string values beneath responsePath. Returns at most 20 matches with 240 characters of context each.',
+        properties: {
+          query: { type: 'string', minLength: 1, maxLength: 500 },
+          caseSensitive: { type: 'boolean', default: false },
+        },
+        required: ['query'],
       },
       pageSize: { type: 'integer', minimum: 1, maximum: MAX_PAGE_SIZE, default: DEFAULT_PAGE_SIZE },
       cursor: { type: 'string', description: 'Opaque next cursor from the previous query page' },
@@ -508,7 +500,7 @@ function compactToBudget(value: unknown, budget: number, wrap: (compacted: unkno
   return {
     _summary_unavailable: 'value is too large to summarize within the inline budget',
     _type: jsonType(value),
-    _next_step: 'query a narrower responsePath, or page the raw bytes with read_response_artifact',
+    _next_step: 'query a narrower responsePath, project fewer fields, or use textSearch for large strings',
   };
 }
 
@@ -775,7 +767,6 @@ function artifactReference(artifactId: string, metadata: ArtifactMetadata): Arti
     byte_length: metadata.byte_length,
     sha256: metadata.sha256,
     expires_at: metadata.expires_at,
-    read_tool: 'read_response_artifact',
     query_tool: 'query_response_artifact',
     response_root: '/',
     primary_paths: metadata.primary_paths ?? [],
@@ -919,96 +910,6 @@ export function persistResponseArtifact(value: unknown, owner: string, encoded?:
   return artifactReference(id, metadata);
 }
 
-/** Backs up to the nearest UTF-8 codepoint boundary at or before `tentativeEnd`. */
-function utf8Boundary(content: Buffer, offset: number, tentativeEnd: number, total: number): number {
-  const capped = Math.min(tentativeEnd, total);
-  if (capped >= total) return total;
-  let end = capped;
-  while (end > offset && (content[end - offset] & 0xc0) === 0x80) end -= 1;
-  return end;
-}
-
-function readWindow(dataPath: string, offset: number, length: number): Buffer {
-  const fd = openSync(dataPath, 'r');
-  try {
-    const buffer = Buffer.allocUnsafe(length);
-    const read = readSync(fd, buffer, 0, length, offset);
-    return buffer.subarray(0, read);
-  } finally {
-    closeSync(fd);
-  }
-}
-
-export function readResponseArtifact(artifactId: string, cursor: string | undefined, owner: string): unknown {
-  const { dataPath, metadata } = loadMetadata(artifactId, owner);
-  const total = statSync(dataPath).size;
-
-  let offset = 0;
-  if (cursor) {
-    const decoded = decodeCursor(cursor) as { artifactId: string; offset: number; owner: string };
-    if (decoded.owner !== safeOwner(owner)) {
-      throw new ArtifactHandleError('invalid_cursor', 'Artifact cursor was issued for a different MCP scope');
-    }
-    if (decoded.artifactId !== artifactId) {
-      throw new ArtifactHandleError(
-        'invalid_cursor',
-        `Artifact cursor does not belong to artifactId ${artifactId}; it was issued for ${decoded.artifactId}. ` +
-        `Pass that id, or restart without a cursor.`,
-      );
-    }
-    offset = decoded.offset;
-  }
-  if (offset > total) {
-    throw new ArtifactHandleError('invalid_cursor', 'Artifact cursor is past the end of the artifact');
-  }
-
-  const build = (chunk: Buffer, nextOffset: number) => {
-    const nextCursor = nextOffset < total
-      ? encodeCursor({ artifactId, offset: nextOffset, owner: safeOwner(owner) })
-      : null;
-    const result = {
-      artifact_id: artifactId,
-      media_type: metadata.media_type,
-      offset,
-      text: chunk.toString('utf8'),
-      response_meta: {
-        contract_version: 2,
-        truncated: nextCursor !== null,
-        truncation_reason: nextCursor ? 'artifact_page' : null,
-        returned_count: chunk.length,
-        total_count: total,
-        next_cursor: nextCursor,
-        serialized_bytes: 0,
-        page_unit: 'bytes' as const,
-        source_truncated: metadata.source_truncated ?? false,
-        ...completionMetadata(nextCursor !== null, chunk.length, total, offset),
-      } satisfies ResponseMeta,
-    };
-    return result;
-  };
-
-  // Read one window plus a few bytes so the codepoint boundary can be inspected.
-  const window = readWindow(dataPath, offset, Math.min(ARTIFACT_PAGE_BYTES + 4, Math.max(total - offset, 0) + 4));
-  let end = utf8Boundary(window, offset, offset + ARTIFACT_PAGE_BYTES, total);
-  let chunk = window.subarray(0, end - offset);
-
-  // JSON escaping inflates the emitted envelope well beyond the raw window, so shrink
-  // until the reply itself fits the inline budget.
-  while (chunk.length > MIN_ARTIFACT_PAGE_BYTES && emittedBytes(build(chunk, offset + chunk.length)) > INLINE_RESULT_BYTES) {
-    end = utf8Boundary(window, offset, offset + Math.floor(chunk.length / 2), total);
-    const shrunk = end - offset;
-    if (shrunk <= 0) break;
-    chunk = window.subarray(0, shrunk);
-  }
-
-  const result = build(chunk, offset + chunk.length);
-  result.response_meta.serialized_bytes = emittedBytes(result);
-  logger.debug('Read MCP response artifact page', {
-    artifactId, offset, bytes: chunk.length, total, serialized: result.response_meta.serialized_bytes,
-  });
-  return result;
-}
-
 type Selection =
   | { kind: 'array'; items: unknown[] }
   | { kind: 'object'; entries: Array<[string, unknown]> }
@@ -1022,6 +923,128 @@ function classify(selected: unknown): Selection {
   return { kind: 'scalar', value: selected };
 }
 
+interface TextSearchMatch {
+  pointer: string;
+  offset: number;
+  context: string;
+  context_start: number;
+  context_end: number;
+}
+
+const TEXT_SEARCH_MAX_MATCHES = 20;
+const TEXT_SEARCH_CONTEXT_CHARS = 240;
+
+function searchStringValues(
+  selected: unknown,
+  responsePath: string,
+  search: TextSearch,
+): { matches: TextSearchMatch[]; truncated: boolean } {
+  if (!search || typeof search !== 'object' || typeof search.query !== 'string') {
+    throw new Error('textSearch.query must be a non-empty string');
+  }
+  if (search.query.length < 1 || search.query.length > 500) {
+    throw new Error('textSearch.query must contain between 1 and 500 characters');
+  }
+
+  const needle = search.caseSensitive ? search.query : search.query.toLowerCase();
+  const matches: TextSearchMatch[] = [];
+  let truncated = false;
+
+  const visit = (value: unknown, at: string): void => {
+    if (truncated) return;
+    if (typeof value === 'string') {
+      const haystack = search.caseSensitive ? value : value.toLowerCase();
+      let from = 0;
+      while (from <= haystack.length) {
+        const offset = haystack.indexOf(needle, from);
+        if (offset < 0) break;
+        if (matches.length >= TEXT_SEARCH_MAX_MATCHES) {
+          truncated = true;
+          return;
+        }
+        const flank = Math.floor((TEXT_SEARCH_CONTEXT_CHARS - search.query.length) / 2);
+        const contextStart = Math.max(0, offset - Math.max(flank, 0));
+        const contextEnd = Math.min(value.length, contextStart + TEXT_SEARCH_CONTEXT_CHARS);
+        matches.push({
+          pointer: at || '',
+          offset,
+          context: value.slice(contextStart, contextEnd),
+          context_start: contextStart,
+          context_end: contextEnd,
+        });
+        from = offset + Math.max(needle.length, 1);
+      }
+      return;
+    }
+    if (Array.isArray(value)) {
+      value.forEach((child, index) => visit(child, `${at}/${index}`));
+      return;
+    }
+    if (value && typeof value === 'object') {
+      for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+        visit(child, `${at}/${escapeToken(key)}`);
+        if (truncated) return;
+      }
+    }
+  };
+
+  visit(selected, responsePath);
+  return { matches, truncated };
+}
+
+function objectModeSuggestion(
+  artifactId: string,
+  responsePath: string,
+  pageSize: number,
+  fields?: string[],
+  filters?: ResponseFilter[],
+): Record<string, unknown> {
+  const suggested: Record<string, unknown> = {
+    artifactId,
+    responsePath,
+    objectMode: 'entries',
+    pageSize,
+  };
+  if (filters?.length) {
+    suggested.filters = filters.map(filter => ({
+      ...filter,
+      path: filter.path === '/from' ? '/key' : filter.path.startsWith('/value/') || filter.path === '/key'
+        ? filter.path
+        : `/value${filter.path}`,
+    }));
+  }
+  if (fields?.length) {
+    suggested.fields = fields.map(field => field === 'key' || field === '/key'
+      ? 'key'
+      : field.startsWith('/value/') ? field : `/value${fieldPointer(field)}`);
+  } else if (filters?.length) {
+    suggested.fields = ['key', 'value'];
+  }
+  return suggested;
+}
+
+function objectModeRequired(
+  artifactId: string,
+  responsePath: string,
+  pageSize: number,
+  fields?: string[],
+  filters?: ResponseFilter[],
+): Error {
+  const suggestion = objectModeSuggestion(artifactId, responsePath, pageSize, fields, filters);
+  return new Error(
+    `OBJECT_MODE_REQUIRED: ${responsePath || '/'} selects a keyed JSON object, not an array. ` +
+    `Query its entries and filter /key or fields beneath /value. suggested_request=${JSON.stringify(suggestion)}`,
+  );
+}
+
+function isKeyedObject(value: unknown): boolean {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const entries = Object.values(value as Record<string, unknown>);
+  if (entries.length < 2) return false;
+  const objectValues = entries.filter(child => child !== null && typeof child === 'object' && !Array.isArray(child));
+  return objectValues.length >= entries.length / 2;
+}
+
 export function queryResponseArtifact(
   artifactId: string,
   responsePath: string,
@@ -1032,6 +1055,7 @@ export function queryResponseArtifact(
   owner: string,
   describe = false,
   objectMode?: 'entries',
+  textSearch?: TextSearch,
 ): unknown {
   if (!Number.isInteger(pageSize) || pageSize < 1 || pageSize > MAX_PAGE_SIZE) {
     throw new Error(`pageSize must be an integer between 1 and ${MAX_PAGE_SIZE}`);
@@ -1053,6 +1077,37 @@ export function queryResponseArtifact(
 
   let selected = pointer(document, responsePath);
   let inferredResponsePath: string | undefined;
+
+  if (textSearch !== undefined) {
+    if (describe || fields?.length || filters?.length || objectMode !== undefined || cursor) {
+      throw new Error('textSearch cannot be combined with describe, fields, filters, objectMode, or cursor');
+    }
+    const searched = searchStringValues(selected, responsePath, textSearch);
+    const meta: ResponseMeta = {
+      contract_version: 2,
+      truncated: searched.truncated,
+      complete: !searched.truncated,
+      truncation_reason: searched.truncated ? 'match_limit' : null,
+      returned_count: searched.matches.length,
+      total_count: searched.truncated ? null : searched.matches.length,
+      remaining_count: null,
+      next_cursor: null,
+      serialized_bytes: 0,
+      page_unit: 'items',
+      source_truncated: sourceTruncated,
+      warning: searched.truncated
+        ? `More than ${TEXT_SEARCH_MAX_MATCHES} matches exist; narrow responsePath or use a more specific literal.`
+        : null,
+    };
+    const result = {
+      artifact_id: artifactId,
+      response_path: responsePath,
+      response: searched.matches,
+      response_meta: meta,
+    };
+    meta.serialized_bytes = emittedBytes(result);
+    return result;
+  }
 
   if (describe) {
     if (fields?.length || filters?.length) {
@@ -1121,10 +1176,10 @@ export function queryResponseArtifact(
     } else {
       const inferred = singleArrayChild(selected);
       if (!inferred) {
-        throw new Error(
-          `filters require responsePath to select a JSON array, but ${responsePath || '/'} selects ` +
-          `${jsonType(selected)}. Use describe=true to find an array path.`,
-        );
+        if (isKeyedObject(selected)) {
+          throw objectModeRequired(artifactId, responsePath, pageSize, fields, filters);
+        }
+        throw new Error(`filters require responsePath to select a JSON array, but ${responsePath || '/'} selects ${jsonType(selected)}. Use describe=true to find an array path.`);
       }
       inferredResponsePath = joinResponsePath(responsePath, inferred.path);
       selectedArray = inferred.value;
@@ -1142,7 +1197,12 @@ export function queryResponseArtifact(
     } catch (error) {
       const inferred = error instanceof Error && error.message.includes('fields matched no properties')
         ? singleArrayChild(selected) : undefined;
-      if (!inferred) throw error;
+      if (!inferred) {
+        if (isKeyedObject(selected)) {
+          throw objectModeRequired(artifactId, responsePath, pageSize, fields, filters);
+        }
+        throw error;
+      }
       inferredResponsePath = joinResponsePath(responsePath, inferred.path);
       selected = inferred.value;
       projected = projectSelection(selected, fields);
@@ -1223,7 +1283,7 @@ export function queryResponseArtifact(
       if (fieldsResolved) meta.fields_resolved = fieldsResolved;
       if (inferredResponsePath) meta.inferred_response_path = inferredResponsePath;
       const notes = [...unitWarnings];
-      if (truncated) notes.push('The selected value exceeded the inline budget; page it with read_response_artifact.');
+      if (truncated) notes.push('The selected value exceeded the inline budget; query a narrower responsePath or use textSearch for a literal within large strings.');
       if (notes.length) meta.warning = [meta.warning, ...notes].filter(Boolean).join(' ');
       return { artifact_id: artifactId, response_path: responsePath, response, response_meta: meta };
     };
@@ -1266,8 +1326,8 @@ export function queryResponseArtifact(
     if (truncationReason === 'item_size_limit') {
       notes.push(
         `A single ${pageUnit === 'entries' ? 'entry' : 'item'} at offset ${offset} exceeded the inline ` +
-        `budget and was summarized. To read it in full, page the raw bytes with read_response_artifact, ` +
-        `or query a narrower responsePath beneath it.`,
+        `budget and was summarized. Query a narrower responsePath beneath it, project fewer fields, ` +
+        `or use textSearch for a literal within large strings.`,
       );
     }
     if (notes.length) meta.warning = [meta.warning, ...notes].filter(Boolean).join(' ');
@@ -1380,8 +1440,8 @@ export function boundToolResult(toolName: string, value: unknown, owner: string)
     guidance:
       `The visible ${toolName} summary is a RESHAPED preview, not a subtree of the artifact: its ` +
       `nesting and field names differ from the stored JSON, so do not copy pointers out of it.` +
-      `${pathHint} Use query_response_artifact with describe=true to inspect the real shape, and ` +
-      `read_response_artifact only as a raw byte fallback.`,
+      `${pathHint} Use query_response_artifact with describe=true to inspect the real shape, then ` +
+      `filter, project, or search only the data needed for the task.`,
   };
 
   if (emittedBytes(bounded) > PREVIEW_RESULT_BYTES) {
