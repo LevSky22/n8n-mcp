@@ -97,7 +97,7 @@ export const n8nExecutionsDoc: ToolDocumentation = {
     ],
     pitfalls: [
       'Requires N8N_API_URL and N8N_API_KEY configured',
-      'mode="full" can produce a large artifact for complex workflows; prefer query_response_artifact for structured output and use read_response_artifact only as a raw fallback',
+      'mode="full" can produce a large artifact for complex workflows; prefer summary, error, or filtered mode, then use query_response_artifact for any stored JSON',
       'mode="error" fetches workflow by default (adds ~50-100ms), disable with fetchWorkflow=false',
       'Execution must exist or returns 404',
       'Delete is permanent - cannot undo'

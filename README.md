@@ -72,9 +72,8 @@ Want to use n8n-MCP with your n8n instance? Check out our comprehensive [n8n Dep
 Compact JSON tool results stay inline up to a conservative 32 KiB budget. Larger workflow,
 execution, documentation, and host-injected tool results return a compact
 preview capped at 8 KiB plus `response_meta.artifact`. Prefer `query_response_artifact` to
-select, filter, project, and paginate structured JSON without loading the full
-artifact into model context; `read_response_artifact` remains a raw 24 KiB page
-fallback. Artifact query paths use RFC 6901, while projected fields accept
+select, filter, project, search, and paginate structured JSON without loading the full
+artifact into model context. Artifact query paths use RFC 6901, while projected fields accept
 either root names such as `id` or pointers such as `/status/name`. When fields
 or filters target an object containing exactly one array child,
 the query selects that collection and reports its pointer as
@@ -83,7 +82,8 @@ more specific path. Use
 `objectMode: "entries"` to query keyed objects (including native n8n connection
 maps) as `{key, value}` rows; filters can then select several keys in one call.
 `describe: true` pages shape metadata and returns absolute child pointers for
-objects. Query and read pages use response contract version 2 and do not repeat
+objects. `textSearch` performs bounded literal search across large string values.
+Query pages use response contract version 2 and do not repeat
 the full artifact descriptor minted by the originating tool. The full serialized MCP result is capped at
 128 KiB, artifacts are capped at 50 MiB, expire after 24 hours, and are pruned
 at a 1 GiB quota.
@@ -91,7 +91,8 @@ at a 1 GiB quota.
 Every bounded result reports `response_meta.complete`, returned/total/remaining
 counts, and an opaque next cursor. A compact preview is never exhaustive when
 `complete` is false, even if an upstream payload says it is on its last page.
-Follow the cursor until it is null. Structured cursors are signed and bound to
+Request another semantic page only when the current page did not answer the question.
+Structured cursors are signed and bound to
 the artifact, instance scope, and exact query view.
 
 `n8n_executions({action: "list"})` defaults to 20 records. Existing execution

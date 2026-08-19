@@ -121,7 +121,7 @@ When working with Code nodes, always start by calling the relevant guide:
    - validate_node({nodeType: "nodes-base.slack", config: {...}}) - Full validation with errors/warnings/suggestions
    - validate_workflow({workflow: {...}}) - Validate entire workflow
 
-## Tool Categories (27 Tools Total)
+## Tool Categories (26 Tools Total)
 
 **Documentation Tools** (1 tool)
 - tools_documentation - This reference; pass a topic for one tool, depth='full' for detail
@@ -169,17 +169,16 @@ When working with Code nodes, always start by calling the relevant guide:
 - n8n_manage_folders - Manage workflow folders (action='create'/'list'/'get'/'rename'/'move'/'delete', n8n 2.19+; workflow placement via parentFolderId/moveToFolder needs 2.32+)
 - n8n_audit_instance - Security audit of the n8n instance
 
-**Large-Result Tools** (2 tools)
+**Large-Result Tools** (1 tool)
 When a result is too large for context it is stored as an artifact and the response carries a handle in response_meta.artifact.
-- query_response_artifact - Query structured JSON inside an artifact. Start with describe=true: the inline preview is a reshaped summary, so a pointer copied from it may not exist in the artifact (response_meta.artifact.primary_paths lists ones that do)
-- read_response_artifact - Read an artifact as bounded raw text pages; prefer the query tool for JSON
+- query_response_artifact - Query structured JSON inside an artifact. Start with describe=true, then filter, project, page matching results, or use bounded literal textSearch
 
 ## Performance Characteristics
 - Instant (<10ms): search_nodes, get_node (minimal/standard)
 - Fast (<100ms): validate_node, get_template
 - Moderate (100-500ms): validate_workflow, get_node (full detail)
 - Network-dependent: All n8n_* tools
-- Local artifact read: query_response_artifact, read_response_artifact
+- Local artifact analysis: query_response_artifact
 
 For comprehensive documentation on any tool:
 tools_documentation({topic: "tool_name", depth: "full"})${buildDisabledOpsOverviewSection(disabledToolOps)}`;
