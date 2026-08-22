@@ -20,9 +20,10 @@ export const queryResponseArtifactDoc: ToolDocumentation = {
     performance: 'Fast - reads a stored artifact from disk, no n8n API call',
     tips: [
       'Call with describe=true first. The inline preview you just read is a reshaped summary, so a pointer copied out of it may not exist in the artifact.',
-      'response_meta.artifact.primary_paths lists pointers that do resolve — prefer those over guessing.',
-      'Use responsePath: "" for the artifact root.',
-      'On a selected object, fields or filters infer exactly one array child and report its full pointer as response_meta.inferred_response_path; ambiguous shapes still need a more specific responsePath.',
+      'responseMeta.artifact.primaryPaths lists pointers that do resolve — prefer those over guessing.',
+      'Omit responsePath to use the artifact\'s advertised responseRoot (the n8n artifact root is ""). Pass responsePath: "" explicitly for the whole document.',
+      'RFC 6901 treats "/" as a property whose name is empty; it is not the document root.',
+      'On a selected object, fields or filters infer exactly one array child and report its full pointer as responseMeta.inferredResponsePath; ambiguous shapes still need a more specific responsePath.',
       'Request another semantic page only when the current page did not answer the question.',
       'An unknown artifactId means the handle expired or the server restarted — re-run the tool that produced it.'
     ]
@@ -30,24 +31,25 @@ export const queryResponseArtifactDoc: ToolDocumentation = {
   full: {
     description: `Queries structured JSON held in a large MCP result artifact, so a response too big for context can still be read precisely.
 
-When a tool result exceeds the inline budget, the response-bounding layer stores the full payload as an artifact and returns a bounded preview plus a handle in response_meta.artifact. This tool navigates that stored payload.
+When a tool result exceeds the inline budget, the response-bounding layer stores the full payload as an artifact and returns a bounded preview plus a handle in responseMeta.artifact. This tool navigates that stored payload.
 
 The important failure mode is pointer drift. When filters or fields shaped the inline preview, that preview is a summary with its own keys — not a window onto the artifact's structure. Pointers copied from it can fail with "JSON pointer does not exist". Two mechanisms exist to avoid guessing:
 
 - describe=true returns the shape at responsePath (types, key names, array lengths) instead of values, with a usable pointer on each entry.
-- response_meta.artifact.primary_paths lists pointers already known to resolve.
+- responseMeta.artifact.primaryPaths lists pointers already known to resolve.
 
 Arrays page by element and objects page by entry.`,
     parameters: {
       artifactId: {
         type: 'string',
         required: true,
-        description: 'Opaque artifact id returned in response_meta.artifact.id'
+        description: 'Opaque artifact id returned in responseMeta.artifact.id'
       },
       responsePath: {
         type: 'string',
-        required: true,
-        description: 'RFC 6901 pointer selecting the value to query; use an empty string for the artifact root. Fields or filters infer a child only when the selected object contains exactly one array.'
+        required: false,
+        default: '',
+        description: 'RFC 6901 pointer selecting the value to query. Omit it to use responseMeta.artifact.responseRoot; for n8n that default is the whole document (empty string). A literal "/" selects an empty-key property, not the root.'
       },
       describe: {
         type: 'boolean',
@@ -58,12 +60,12 @@ Arrays page by element and objects page by entry.`,
       fields: {
         type: 'array',
         required: false,
-        description: 'Root property names (id) or RFC 6901 pointers (/status/name) projected from each selected item, max 50. Fields that do not resolve are omitted rather than returned as null; check response_meta.fields_resolved.'
+        description: 'Root property names (id) or RFC 6901 pointers (/status/name) projected from each selected item, max 50. Fields that do not resolve are omitted rather than returned as null; check responseMeta.fieldsResolved.'
       },
       filters: {
         type: 'array',
         required: false,
-        description: 'Provider-independent predicates applied to a selected array, max 10. Each entry takes path (pointer relative to the item), op (eq, ne, in, contains, lt, lte, gt, gte, exists; default eq) and value.'
+        description: 'Provider-independent predicates applied to a selected array, max 10. Each entry takes path (pointer relative to the item), op (eq, ne, in, contains, icontains, lt, lte, gt, gte, exists; default eq) and value.'
       },
       objectMode: {
         type: 'string',
@@ -88,9 +90,9 @@ Arrays page by element and objects page by entry.`,
       }
     },
     returns:
-      'The selected value (or its shape when describe=true) plus response_meta carrying next_cursor, counts, fields_resolved, any inferred_response_path, and an artifact block with id, expiry and primary_paths.',
+      'The selected value (or its shape when describe=true) plus responseMeta carrying nextCursor, counts, fieldsResolved, any inferredResponsePath, and an artifact block with id, expiry and primaryPaths.',
     examples: [
-      'query_response_artifact({artifactId: "a1b2c3", responsePath: "", describe: true}) - discover the top-level shape',
+      'query_response_artifact({artifactId: "a1b2c3", describe: true}) - describe the advertised default response root',
       'query_response_artifact({artifactId: "a1b2c3", responsePath: "/data", describe: true}) - array length and item shape before paging',
       'query_response_artifact({artifactId: "a1b2c3", responsePath: "/data", fields: ["id", "/status/name"], pageSize: 50}) - project two fields per element',
       'query_response_artifact({artifactId: "a1b2c3", responsePath: "/data", filters: [{path: "/status/name", op: "eq", value: "error"}]}) - select failing entries only',
@@ -101,14 +103,14 @@ Arrays page by element and objects page by entry.`,
       'Pull a handful of fields out of a long list result',
       'Filter a large array down to the entries that matter',
       'Search large string values while keeping the full payload out of model context',
-      'Recover from "JSON pointer does not exist" by describing the shape instead of guessing again'
+      'Recover from INVALID_RESPONSE_PATH by using its available-child hints or describing a valid parent'
     ],
     performance: 'Fast - local artifact read; cost scales with the selected page, not the artifact size',
     errorHandling:
-      '"JSON pointer does not exist" means responsePath is not present in the artifact: re-run with describe=true, or use a pointer from response_meta.artifact.primary_paths. An unknown artifactId means the handle expired (24 hour ceiling) or the MCP server restarted; re-run the originating tool to mint a new one.',
+      'INVALID_RESPONSE_PATH means an explicit responsePath is absent. Use the reported parent and available children, omit responsePath to restore the advertised responseRoot, or describe a valid parent. An unknown artifactId means the handle expired (24 hour ceiling) or the MCP server restarted; re-run the originating tool to mint a new one.',
     bestPractices: [
-      'describe=true before the first real query against an unfamiliar payload',
-      'Prefer primary_paths over pointers copied from an inline preview',
+      'Omit responsePath for the first query; use describe=true when the default root\'s shape is unfamiliar',
+      'Prefer primaryPaths over pointers copied from an inline preview',
       'Request another page only when more matching results are needed',
       'Narrow with filters and fields rather than paging everything'
     ],
@@ -116,8 +118,8 @@ Arrays page by element and objects page by entry.`,
       'A pointer that worked against the inline preview may not exist in the artifact when filters or fields reshaped that preview',
       'Envelope inference is deliberately limited to one array child; with zero or multiple arrays, pass a more specific responsePath',
       'Artifact handles do not survive an MCP server restart even inside the 24 hour window',
-      'Treating one page as the full result: check response_meta before summarising',
-      'Artifacts are scoped to the caller that created them'
+      'Treating one page as the full result: check responseMeta before summarising',
+      'Artifacts and v3 cursors are scoped to the caller that created them; older contract cursors are rejected'
     ],
     relatedTools: ['n8n_executions', 'n8n_get_workflow']
   }

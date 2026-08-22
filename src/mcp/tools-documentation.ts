@@ -170,7 +170,7 @@ When working with Code nodes, always start by calling the relevant guide:
 - n8n_audit_instance - Security audit of the n8n instance
 
 **Large-Result Tools** (1 tool)
-When a result is too large for context it is stored as an artifact and the response carries a handle in response_meta.artifact.
+When a result is too large for context it is stored as an artifact and the response carries a handle in responseMeta.artifact.
 - query_response_artifact - Query structured JSON inside an artifact. Start with describe=true, then filter, project, page matching results, or use bounded literal textSearch
 
 ## Performance Characteristics

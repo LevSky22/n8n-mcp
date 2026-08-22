@@ -11,6 +11,7 @@ import {
   persistResponseArtifact,
   pruneResponseArtifacts,
   queryResponseArtifact,
+  queryResponseArtifactTool,
 } from '../../../src/services/mcp-response-bounding';
 
 describe('MCP response bounding', () => {
@@ -32,6 +33,25 @@ describe('MCP response bounding', () => {
     delete process.env.MCP_RESPONSE_ARTIFACT_QUOTA_BYTES;
     delete process.env.MCP_RESPONSE_PARSE_CACHE_TTL_MS;
     rmSync(root, { recursive: true, force: true });
+  });
+
+  it('advertises only the unified camelCase v3 query contract', () => {
+    const schema = queryResponseArtifactTool.inputSchema;
+    expect(Object.keys(schema.properties)).toEqual(expect.arrayContaining([
+      'artifactId', 'responsePath', 'fields', 'filters', 'pageSize', 'cursor',
+      'describe', 'objectMode', 'textSearch',
+    ]));
+    expect(schema.required).toEqual(['artifactId']);
+    expect(schema.additionalProperties).toBe(false);
+    expect(schema.properties.filters.items.additionalProperties).toBe(false);
+    expect(schema.properties.filters.items.properties.op.enum).toContain('icontains');
+    expect(schema.properties.textSearch.additionalProperties).toBe(false);
+    for (const legacy of [
+      'artifact_id', 'response_path', 'response_filter', 'response_page_size',
+      'response_cursor', 'object_mode', 'text_search',
+    ]) {
+      expect(schema.properties).not.toHaveProperty(legacy);
+    }
   });
 
   it('preserves compact results for backward compatibility', () => {
@@ -57,15 +77,15 @@ describe('MCP response bounding', () => {
     };
 
     const bounded = boundToolResult('n8n_get_workflow', value, 'tenant-a') as any;
-    expect(bounded.response_meta.truncated).toBe(true);
-    expect(bounded.response_meta.complete).toBe(false);
-    expect(bounded.response_meta.warning).toContain('INCOMPLETE RESULT');
-    expect(bounded.response_meta.artifact.byte_length).toBeGreaterThan(INLINE_RESULT_BYTES);
-    expect(bounded.response_meta.artifact.query_tool).toBe('query_response_artifact');
+    expect(bounded.responseMeta.truncated).toBe(true);
+    expect(bounded.responseMeta.complete).toBe(false);
+    expect(bounded.responseMeta.warning).toContain('INCOMPLETE RESULT');
+    expect(bounded.responseMeta.artifact.byteLength).toBeGreaterThan(INLINE_RESULT_BYTES);
+    expect(bounded.responseMeta.artifact.queryTool).toBe('query_response_artifact');
     expect(bounded.data.data.nodes).toHaveLength(40);
     expect(Buffer.byteLength(JSON.stringify(bounded))).toBeLessThan(HARD_RESULT_BYTES);
     const artifact = readFileSync(
-      path.join(root, `response-${bounded.response_meta.artifact.id}.json`),
+      path.join(root, `response-${bounded.responseMeta.artifact.id}.json`),
       'utf8',
     );
     expect(JSON.parse(artifact)).toEqual(value);
@@ -93,12 +113,12 @@ describe('MCP response bounding', () => {
     expect(bounded.data.data.executions).toHaveLength(20);
     expect(bounded.data.data).toMatchObject({
       returned: 20,
-      // page_count is the size of the upstream page, not a global total.
-      page_count: 40,
+      // pageCount is the size of the upstream page, not a global total.
+      pageCount: 40,
       nextCursor: 'upstream-cursor',
       hasMore: true,
     });
-    expect(bounded.data.data).not.toHaveProperty('total_count');
+    expect(bounded.data.data).not.toHaveProperty('totalCount');
     expect(bounded.data.data.executions[0]).not.toHaveProperty('data');
   });
 
@@ -112,11 +132,11 @@ describe('MCP response bounding', () => {
   it('deletes expired artifacts when they are read', () => {
     const value = { records: Array.from({ length: 100 }, (_, i) => ({ i, text: 'z'.repeat(1000) })) };
     const bounded = boundToolResult('additional_large_tool', value, 'tenant-a') as any;
-    const artifactId = bounded.response_meta.artifact.id as string;
+    const artifactId = bounded.responseMeta.artifact.id as string;
     const dataPath = path.join(root, `response-${artifactId}.json`);
     const metaPath = path.join(root, `response-${artifactId}.meta.json`);
     const metadata = JSON.parse(readFileSync(metaPath, 'utf8'));
-    metadata.expires_at = '2000-01-01T00:00:00.000Z';
+    metadata.expiresAt = '2000-01-01T00:00:00.000Z';
     writeFileSync(metaPath, JSON.stringify(metadata));
 
     expect(() => queryResponseArtifact(artifactId, '', undefined, undefined, 20, undefined, 'tenant-a')).toThrow('handle expired at');
@@ -215,7 +235,7 @@ describe('MCP response bounding', () => {
 
     const bounded = boundToolResult('n8n_executions', value, 'tenant-a') as any;
     expect(bounded.data.success).toBe(true);
-    expect(bounded.data.data).toMatchObject({ returned: 5, page_count: 5, hasMore: false });
+    expect(bounded.data.data).toMatchObject({ returned: 5, pageCount: 5, hasMore: false });
   });
 
   it('compacts oversized summaries until the inline budget is met', () => {
@@ -235,9 +255,9 @@ describe('MCP response bounding', () => {
     };
 
     const bounded = boundToolResult('n8n_get_workflow', value, 'tenant-a') as any;
-    expect(bounded.response_meta.truncated).toBe(true);
+    expect(bounded.responseMeta.truncated).toBe(true);
     expect(Buffer.byteLength(JSON.stringify(bounded))).toBeLessThanOrEqual(INLINE_RESULT_BYTES);
-    expect(bounded.response_meta.artifact).toBeTruthy();
+    expect(bounded.responseMeta.artifact).toBeTruthy();
   });
 
   it('reports omitted fields when compacting wide objects', () => {
@@ -248,7 +268,7 @@ describe('MCP response bounding', () => {
 
     const bounded = boundToolResult('additional_large_tool', value, 'tenant-a') as any;
 
-    expect(bounded.data.wide._omitted_fields).toBe(5);
+    expect(bounded.data.wide._omittedFields).toBe(5);
     expect(Object.keys(bounded.data.wide)).toHaveLength(21);
   });
 
@@ -280,14 +300,14 @@ describe('MCP response bounding', () => {
       { id: 7, name: 'Record 7', '/state/name': 'open' },
       { id: 9, name: 'Record 9', '/state/name': 'open' },
     ]);
-    expect(first.response_meta).toMatchObject({
+    expect(first.responseMeta).toMatchObject({
       complete: false,
-      returned_count: 3,
-      total_count: 6,
-      remaining_count: 3,
-      truncation_reason: 'page_limit',
+      returnedCount: 3,
+      totalCount: 6,
+      remainingCount: 3,
+      truncationReason: 'page_limit',
     });
-    expect(first.response_meta.next_cursor).toBeTruthy();
+    expect(first.responseMeta.nextCursor).toBeTruthy();
 
     const second = queryResponseArtifact(
       artifact.id,
@@ -295,16 +315,16 @@ describe('MCP response bounding', () => {
       ['id', 'name', '/state/name'],
       [{ path: '/state/name', op: 'eq', value: 'open' }, { path: '/score', op: 'gte', value: 5 }],
       3,
-      first.response_meta.next_cursor,
+      first.responseMeta.nextCursor,
       'tenant-a',
     ) as any;
     expect(second.response.map((item: any) => item.id)).toEqual([11, 13, 15]);
-    expect(second.response_meta).toMatchObject({
+    expect(second.responseMeta).toMatchObject({
       complete: true,
-      returned_count: 3,
-      total_count: 6,
-      remaining_count: 0,
-      next_cursor: null,
+      returnedCount: 3,
+      totalCount: 6,
+      remainingCount: 0,
+      nextCursor: null,
     });
   });
 
@@ -319,10 +339,10 @@ describe('MCP response bounding', () => {
       undefined,
       'tenant-a',
     ) as any;
-    // Unresolved pointers are omitted, not nulled; fields_resolved makes the miss visible.
+    // Unresolved pointers are omitted, not nulled; fieldsResolved makes the miss visible.
     expect(optional.response).toEqual([{ id: 2 }]);
-    expect(optional.response_meta.fields_resolved).toEqual({ id: 1, optional: 0 });
-    expect(optional.response_meta.warning).toContain('optional');
+    expect(optional.responseMeta.fieldsResolved).toEqual({ id: 1, optional: 0 });
+    expect(optional.responseMeta.warning).toContain('optional');
 
     expect(() => queryResponseArtifact(
       artifact.id,
@@ -341,16 +361,16 @@ describe('MCP response bounding', () => {
       populated.id, '', ['id', 'name'], undefined, 20, undefined, 'tenant-a',
     ) as any;
     expect(projected.response).toEqual([{ id: 'one', name: 'Example' }]);
-    expect(projected.response_meta.inferred_response_path).toBe('/fields');
-    expect(projected.response_meta.fields_resolved).toEqual({ id: 1, name: 1 });
+    expect(projected.responseMeta.inferredResponsePath).toBe('/fields');
+    expect(projected.responseMeta.fieldsResolved).toEqual({ id: 1, name: 1 });
 
     const empty = persistResponseArtifact({ fields: [] }, 'tenant-a');
     const emptyProjection = queryResponseArtifact(
       empty.id, '', ['id'], undefined, 20, undefined, 'tenant-a',
     ) as any;
     expect(emptyProjection.response).toEqual([]);
-    expect(emptyProjection.response_meta.inferred_response_path).toBe('/fields');
-    expect(emptyProjection.response_meta.fields_resolved).toEqual({ id: 0 });
+    expect(emptyProjection.responseMeta.inferredResponsePath).toBe('/fields');
+    expect(emptyProjection.responseMeta.fieldsResolved).toEqual({ id: 0 });
   });
 
   it('does not infer a child when a projected root field resolves', () => {
@@ -359,7 +379,7 @@ describe('MCP response bounding', () => {
       artifact.id, '', ['id'], undefined, 20, undefined, 'tenant-a',
     ) as any;
     expect(projected.response).toEqual({ id: 'root' });
-    expect(projected.response_meta.inferred_response_path).toBeUndefined();
+    expect(projected.responseMeta.inferredResponsePath).toBeUndefined();
   });
 
   it('infers one array for root filtering and refuses ambiguous envelopes', () => {
@@ -371,7 +391,7 @@ describe('MCP response bounding', () => {
       20, undefined, 'tenant-a',
     ) as any;
     expect(filtered.response).toEqual([{ kind: 'keep' }]);
-    expect(filtered.response_meta.inferred_response_path).toBe('/rows');
+    expect(filtered.responseMeta.inferredResponsePath).toBe('/rows');
 
     const ambiguous = persistResponseArtifact(
       { rows: [{ id: 1 }], errors: [] }, 'tenant-a',
@@ -389,7 +409,7 @@ describe('MCP response bounding', () => {
       artifact.id, '/data', ['id'], undefined, 20, undefined, 'tenant-a',
     ) as any;
     expect(projected.response).toEqual([{ id: 'one' }]);
-    expect(projected.response_meta.inferred_response_path).toBe('/data/executions');
+    expect(projected.responseMeta.inferredResponsePath).toBe('/data/executions');
   });
 
   it('binds structured query cursors to artifact, scope, and exact view', () => {
@@ -402,10 +422,10 @@ describe('MCP response bounding', () => {
     ) as any;
 
     expect(() => queryResponseArtifact(
-      secondArtifact.id, '/rows', undefined, undefined, 1, first.response_meta.next_cursor, 'tenant-a',
+      secondArtifact.id, '/rows', undefined, undefined, 1, first.responseMeta.nextCursor, 'tenant-a',
     )).toThrow(firstArtifact.id);
     expect(() => queryResponseArtifact(
-      firstArtifact.id, '/rows', undefined, undefined, 2, first.response_meta.next_cursor, 'tenant-a',
+      firstArtifact.id, '/rows', undefined, undefined, 2, first.responseMeta.nextCursor, 'tenant-a',
     )).toThrow('does not match this query');
     expect(() => queryResponseArtifact(
       firstArtifact.id, '/rows', undefined, undefined, 1, undefined, 'tenant-b',
@@ -420,13 +440,13 @@ describe('MCP response bounding', () => {
       artifact.id, '/rows', undefined, undefined, 20, undefined, 'tenant-a',
     ) as any;
     expect(first.response[0].id).toBe(1);
-    expect(first.response_meta).toMatchObject({
-      returned_count: 1,
-      total_count: 2,
-      remaining_count: 1,
-      truncation_reason: 'item_size_limit',
+    expect(first.responseMeta).toMatchObject({
+      returnedCount: 1,
+      totalCount: 2,
+      remainingCount: 1,
+      truncationReason: 'item_size_limit',
     });
-    expect(first.response_meta.next_cursor).toBeTruthy();
+    expect(first.responseMeta.nextCursor).toBeTruthy();
     expect(Buffer.byteLength(JSON.stringify(first))).toBeLessThan(HARD_RESULT_BYTES);
   });
 
@@ -494,14 +514,17 @@ describe('MCP response bounding', () => {
       artifact.id, '/record', ['id'], undefined, 20, undefined, 'tenant-a',
     ) as any;
     expect(result.response).toEqual({ id: 1 });
-    expect(result.response_meta.complete).toBe(true);
+    expect(result.responseMeta.complete).toBe(true);
 
     expect(() => queryResponseArtifact(
       artifact.id, 'record', undefined, undefined, 20, undefined, 'tenant-a',
     )).toThrow('RFC 6901');
-    expect(() => queryResponseArtifact(
+    const missing = () => queryResponseArtifact(
       artifact.id, '/missing', undefined, undefined, 20, undefined, 'tenant-a',
-    )).toThrow('does not exist');
+    );
+    expect(missing).toThrow('INVALID_RESPONSE_PATH');
+    expect(missing).toThrow('Available children: /record');
+    expect(missing).toThrow('responseRoot=""');
     expect(() => queryResponseArtifact(
       artifact.id, '/record', ['unknown'], undefined, 20, undefined, 'tenant-a',
     )).toThrow('matched no properties');
@@ -519,6 +542,34 @@ describe('MCP response bounding', () => {
       arrayArtifact.id, '/rows/0/id', undefined, undefined, 20, undefined, 'tenant-a',
     ) as any;
     expect(arrayScalar.response).toBe(2);
+
+    const rootArtifact = persistResponseArtifact({ '': 'empty-key', value: 'root' }, 'tenant-a');
+    const defaulted = queryResponseArtifact(
+      rootArtifact.id, undefined, undefined, undefined, 20, undefined, 'tenant-a',
+    ) as any;
+    expect(defaulted.responsePath).toBe('');
+    expect(defaulted.response).toEqual({ '': 'empty-key', value: 'root' });
+    const emptyKey = queryResponseArtifact(
+      rootArtifact.id, '/', undefined, undefined, 20, undefined, 'tenant-a',
+    ) as any;
+    expect(emptyKey.response).toBe('empty-key');
+  });
+
+  it('supports case-insensitive contains filters', () => {
+    const artifact = persistResponseArtifact({ rows: [{ name: 'AddNode' }, { name: 'removeNode' }] }, 'tenant-a');
+    const result = queryResponseArtifact(
+      artifact.id,
+      '/rows',
+      undefined,
+      [{ path: '/name', op: 'icontains', value: 'ADDNODE' }],
+      20,
+      undefined,
+      'tenant-a',
+    ) as any;
+    expect(result.response).toEqual([{ name: 'AddNode' }]);
+    expect(result.responseMeta.filtersApplied).toEqual([
+      { path: '/name', op: 'icontains', resolvedOn: 2, matched: 1 },
+    ]);
   });
 
   it('treats contains on an unsupported scalar type as not matched', () => {
@@ -541,28 +592,28 @@ describe('MCP response bounding', () => {
       artifact.id, '/record', undefined, undefined, 20, undefined, 'tenant-a',
     ) as any;
     expect(first.response).toEqual({ id: 1 });
-    expect(first.response_meta).toMatchObject({
+    expect(first.responseMeta).toMatchObject({
       complete: false,
       truncated: true,
-      page_unit: 'entries',
-      total_count: 2,
-      returned_count: 1,
+      pageUnit: 'entries',
+      totalCount: 2,
+      returnedCount: 1,
     });
-    expect(first.response_meta.next_cursor).toBeTruthy();
+    expect(first.responseMeta.nextCursor).toBeTruthy();
 
     // A 40 KiB entry exceeds the whole budget, so it is summarized and directs the
     // caller to a narrower semantic query.
     const second = queryResponseArtifact(
-      artifact.id, '/record', undefined, undefined, 20, first.response_meta.next_cursor, 'tenant-a',
+      artifact.id, '/record', undefined, undefined, 20, first.responseMeta.nextCursor, 'tenant-a',
     ) as any;
     expect(Object.keys(second.response)).toEqual(['body']);
     expect(second.response.body).toContain('40960 chars total');
-    expect(second.response_meta).toMatchObject({
+    expect(second.responseMeta).toMatchObject({
       truncated: true,
-      truncation_reason: 'item_size_limit',
-      next_cursor: null,
+      truncationReason: 'item_size_limit',
+      nextCursor: null,
     });
-    expect(second.response_meta.warning).toContain('narrower responsePath');
+    expect(second.responseMeta.warning).toContain('narrower responsePath');
     expect(Buffer.byteLength(JSON.stringify(first))).toBeLessThan(HARD_RESULT_BYTES);
   });
 
@@ -574,7 +625,7 @@ describe('MCP response bounding', () => {
     expect(second.id).toBe(first.id);
     expect(other.id).not.toBe(first.id);
     // Reuse must refresh the handle so a long session cannot have it expire underneath.
-    expect(Date.parse(second.expires_at)).toBeGreaterThanOrEqual(Date.parse(first.expires_at));
+    expect(Date.parse(second.expiresAt)).toBeGreaterThanOrEqual(Date.parse(first.expiresAt));
   });
 
   it('rejects a filter path that resolves on no item instead of reporting a complete zero', () => {
@@ -601,9 +652,9 @@ describe('MCP response bounding', () => {
       artifact.id, '/data/executions', ['id'],
       [{ path: '/status', op: 'eq', value: 'success' }], 20, undefined, 'tenant-a',
     ) as any;
-    expect(correct.response_meta.total_count).toBe(10);
-    expect(correct.response_meta.filters_applied).toEqual([
-      { path: '/status', op: 'eq', resolved_on: 10, matched: 10 },
+    expect(correct.responseMeta.totalCount).toBe(10);
+    expect(correct.responseMeta.filtersApplied).toEqual([
+      { path: '/status', op: 'eq', resolvedOn: 10, matched: 10 },
     ]);
 
     const genuineZero = queryResponseArtifact(
@@ -611,8 +662,8 @@ describe('MCP response bounding', () => {
       [{ path: '/status', op: 'eq', value: 'error' }], 20, undefined, 'tenant-a',
     ) as any;
     expect(genuineZero.response).toEqual([]);
-    expect(genuineZero.response_meta).toMatchObject({ total_count: 0, complete: true });
-    expect(genuineZero.response_meta.filters_applied[0]).toMatchObject({ resolved_on: 10, matched: 0 });
+    expect(genuineZero.responseMeta).toMatchObject({ totalCount: 0, complete: true });
+    expect(genuineZero.responseMeta.filtersApplied[0]).toMatchObject({ resolvedOn: 10, matched: 0 });
   });
 
   it('rejects a comparison whose operands are never mutually comparable', () => {
@@ -636,13 +687,13 @@ describe('MCP response bounding', () => {
     expect(described.shape.type).toBe('array');
     expect(described.shape.length).toBe(2);
     // Keys merge across sampled items, so a heterogeneous array still yields usable pointers.
-    const names = described.shape.item_keys.map((key: any) => key.name).sort();
+    const names = described.shape.itemKeys.map((key: any) => key.name).sort();
     expect(names).toEqual(['extra', 'id', 'nested', 'status']);
-    expect(described.shape.item_keys.find((k: any) => k.name === 'id').pointer).toBe('/id');
+    expect(described.shape.itemKeys.find((k: any) => k.name === 'id').pointer).toBe('/id');
     expect(JSON.stringify(described)).not.toContain('error');
-    expect(described.response_meta.complete).toBe(true);
-    expect(described.response_meta.contract_version).toBe(2);
-    expect(described.response_meta.artifact).toBeUndefined();
+    expect(described.responseMeta.complete).toBe(true);
+    expect(described.responseMeta.contractVersion).toBe(3);
+    expect(described.responseMeta.artifact).toBeUndefined();
   });
 
   it('filters native n8n connection maps through generic object entries', () => {
@@ -668,7 +719,7 @@ describe('MCP response bounding', () => {
       'Source Alpha',
       'Decision Beta',
     ]);
-    expect(result.response_meta).toMatchObject({ contract_version: 2, total_count: 2, complete: true });
+    expect(result.responseMeta).toMatchObject({ contractVersion: 3, totalCount: 2, complete: true });
   });
 
   it('returns an executable entry-mode suggestion for keyed object queries', () => {
@@ -727,13 +778,13 @@ describe('MCP response bounding', () => {
       artifact.id, '/value', undefined, undefined, 20, undefined, 'tenant-a',
     ) as any;
 
-    expect(result.response_meta).toMatchObject({
+    expect(result.responseMeta).toMatchObject({
       truncated: true,
-      source_truncated: true,
-      truncation_reason: 'scalar_size_limit',
+      sourceTruncated: true,
+      truncationReason: 'scalar_size_limit',
     });
-    expect(result.response_meta.warning).toContain('reduced view');
-    expect(result.response_meta.warning).toContain('textSearch');
+    expect(result.responseMeta.warning).toContain('reduced view');
+    expect(result.responseMeta.warning).toContain('textSearch');
   });
 
   it('describes scalar, empty-array, and child-array shapes', () => {
@@ -751,7 +802,7 @@ describe('MCP response bounding', () => {
     const empty = queryResponseArtifact(
       artifact.id, '/empty', undefined, undefined, 20, undefined, 'tenant-a', true,
     ) as any;
-    expect(empty.shape).toMatchObject({ type: 'array', length: 0, item_type: null });
+    expect(empty.shape).toMatchObject({ type: 'array', length: 0, itemType: null });
 
     const record = queryResponseArtifact(
       artifact.id, '/record', undefined, undefined, 20, undefined, 'tenant-a', true,
@@ -791,8 +842,8 @@ describe('MCP response bounding', () => {
 
     const bounded = fresh.boundToolResult('n8n_get_workflow', value, 'tenant-a') as any;
     expect(bounded.data.data.connections).toHaveLength(400);
-    expect(bounded.data.data.connections_omitted).toBe(4);
-    expect(bounded.response_meta.artifact.primary_paths).toContain('/data/connections');
+    expect(bounded.data.data.connectionsOmitted).toBe(4);
+    expect(bounded.responseMeta.artifact.primaryPaths).toContain('/data/connections');
   });
 
   it('supports deterministic configuration and rejects signed invalid cursor states', async () => {
@@ -810,7 +861,7 @@ describe('MCP response bounding', () => {
     const artifact = fresh.persistResponseArtifact({ rows: [1, 2, 3] }, 'tenant-a');
     const scopedOwner = createHash('sha256').update('tenant-a').digest('hex');
     const otherOwner = createHash('sha256').update('tenant-b').digest('hex');
-    const sign = (state: Record<string, unknown>, version = 2): string => {
+    const sign = (state: Record<string, unknown>, version = 3): string => {
       const payload = Buffer.from(JSON.stringify({ v: version, ...state }));
       const signature = createHmac('sha256', 'coverage-test-cursor-key').update(payload).digest();
       return Buffer.concat([payload, signature]).toString('base64url');
@@ -858,13 +909,13 @@ describe('MCP response bounding', () => {
       artifact.id, '/data/map', undefined, undefined, 2, undefined, 'tenant-a', true,
     ) as any;
     expect(first.shape.keys.map((key: any) => key.pointer)).toEqual(['/data/map/a~1b', '/data/map/c~0d']);
-    expect(first.response_meta.next_cursor).toBeTruthy();
+    expect(first.responseMeta.nextCursor).toBeTruthy();
 
     const second = queryResponseArtifact(
-      artifact.id, '/data/map', undefined, undefined, 2, first.response_meta.next_cursor, 'tenant-a', true,
+      artifact.id, '/data/map', undefined, undefined, 2, first.responseMeta.nextCursor, 'tenant-a', true,
     ) as any;
     expect(second.shape.keys.map((key: any) => key.pointer)).toEqual(['/data/map/third']);
-    expect(second.response_meta.complete).toBe(true);
+    expect(second.responseMeta.complete).toBe(true);
     expect(() => queryResponseArtifact(
       artifact.id, '/data/map', ['third'], undefined, 2, undefined, 'tenant-a', true,
     )).toThrow('describe cannot be combined');
@@ -880,7 +931,7 @@ describe('MCP response bounding', () => {
 
     const oversized = { rows: Array.from({ length: 80 }, (_, index) => ({ index, payload: 'x'.repeat(1000) })) };
     const bounded = boundToolResult('additional_large_tool', oversized, 'tenant-a') as any;
-    expect(bounded.response_meta.artifact).toBeTruthy();
+    expect(bounded.responseMeta.artifact).toBeTruthy();
     expect(Buffer.byteLength(JSON.stringify(bounded))).toBeLessThanOrEqual(8 * 1024);
   });
 
@@ -895,7 +946,7 @@ describe('MCP response bounding', () => {
 
     // A sliced array must carry a remainder marker.
     expect(Array.isArray(bounded.data.rows)).toBe(true);
-    expect(bounded.data.rows[bounded.data.rows.length - 1]).toEqual({ _omitted_items: 6 });
+    expect(bounded.data.rows[bounded.data.rows.length - 1]).toEqual({ _omittedItems: 6 });
 
     // Scalars must survive depth clipping.
     const three = bounded.data.deep?.two?.three;
@@ -908,17 +959,17 @@ describe('MCP response bounding', () => {
       data: { executions: Array.from({ length: 60 }, (_, i) => ({ id: String(i), blob: 'z'.repeat(1000) })) },
     };
     const bounded = boundToolResult('n8n_executions', value, 'tenant-a') as any;
-    const paths: string[] = bounded.response_meta.artifact.primary_paths;
+    const paths: string[] = bounded.responseMeta.artifact.primaryPaths;
     expect(paths).toContain('/data/executions');
     // Every advertised pointer must resolve against the stored payload.
     for (const pointer of paths) {
       expect(() => queryResponseArtifact(
-        bounded.response_meta.artifact.id, pointer, undefined, undefined, 1, undefined, 'tenant-a', true,
+        bounded.responseMeta.artifact.id, pointer, undefined, undefined, 1, undefined, 'tenant-a', true,
       )).not.toThrow();
     }
     expect(() => queryResponseArtifact(
-      bounded.response_meta.artifact.id, '/data/data/executions', undefined, undefined, 1, undefined, 'tenant-a',
-    )).toThrow('JSON pointer does not exist');
+      bounded.responseMeta.artifact.id, '/data/data/executions', undefined, undefined, 1, undefined, 'tenant-a',
+    )).toThrow('INVALID_RESPONSE_PATH');
   });
 
   it('searches large string values without returning the full artifact', () => {
@@ -936,7 +987,7 @@ describe('MCP response bounding', () => {
     expect(result.response).toHaveLength(2);
     expect(result.response[0]).toMatchObject({ pointer: '/records/0/body', offset: 20_000 });
     expect(result.response[0].context.length).toBeLessThanOrEqual(240);
-    expect(result.response_meta).toMatchObject({ complete: true, returned_count: 2, next_cursor: null });
+    expect(result.responseMeta).toMatchObject({ complete: true, returnedCount: 2, nextCursor: null });
     expect(Buffer.byteLength(JSON.stringify(result))).toBeLessThan(INLINE_RESULT_BYTES);
   });
 
@@ -950,7 +1001,7 @@ describe('MCP response bounding', () => {
     ) as any;
 
     expect(result.response).toHaveLength(20);
-    expect(result.response_meta).toMatchObject({ complete: false, truncated: true, returned_count: 20 });
+    expect(result.responseMeta).toMatchObject({ complete: false, truncated: true, returnedCount: 20 });
     expect(() => queryResponseArtifact(
       artifact.id, '/records', ['body'], undefined, 20, undefined, 'tenant-a', false, undefined,
       { query: 'needle' },

@@ -41,43 +41,43 @@ export interface FilterStat {
   path: string;
   op: FilterOperation;
   /** Items whose `path` actually resolved. Zero means the pointer is wrong, not that nothing matched. */
-  resolved_on: number;
+  resolvedOn: number;
   matched: number;
 }
 
 export interface ResponseMeta {
-  contract_version: 2;
+  contractVersion: 3;
   truncated: boolean;
   complete: boolean;
-  truncation_reason: string | null;
-  returned_count: number | null;
-  total_count: number | null;
-  remaining_count: number | null;
-  next_cursor: string | null;
-  serialized_bytes: number;
+  truncationReason: string | null;
+  returnedCount: number | null;
+  totalCount: number | null;
+  remainingCount: number | null;
+  nextCursor: string | null;
+  serializedBytes: number;
   artifact?: ArtifactReference | null;
   warning: string | null;
-  /** What returned_count/total_count count: array elements or object entries. */
-  page_unit?: 'items' | 'entries';
+  /** What returnedCount/totalCount count: array elements or object entries. */
+  pageUnit?: 'items' | 'entries';
   /** True when the upstream payload was already reduced before it was stored. */
-  source_truncated?: boolean;
-  filters_applied?: FilterStat[];
-  fields_resolved?: Record<string, number>;
+  sourceTruncated?: boolean;
+  filtersApplied?: FilterStat[];
+  fieldsResolved?: Record<string, number>;
   /** Unambiguous one-level array selected structurally when the caller queried the root. */
-  inferred_response_path?: string;
+  inferredResponsePath?: string;
 }
 
 export interface ArtifactReference {
   id: string;
-  media_type: string;
-  byte_length: number;
+  mediaType: string;
+  byteLength: number;
   sha256: string;
-  expires_at: string;
-  query_tool: 'query_response_artifact';
-  response_root: '/';
+  expiresAt: string;
+  queryTool: 'query_response_artifact';
+  responseRoot: '';
   /** Pointers to the artifact's main collections; preview pointers may not exist here. */
-  primary_paths: string[];
-  source_truncated: boolean;
+  primaryPaths: string[];
+  sourceTruncated: boolean;
 }
 
 /** Distinguishes recoverable handle problems so a model can re-mint instead of guessing. */
@@ -94,7 +94,7 @@ export class ArtifactHandleError extends Error {
 /** Tools that already bound their own replies and must not be bounded again. */
 const SELF_BOUNDED_TOOLS = new Set<string>(['query_response_artifact']);
 
-const FILTER_OPERATIONS = ['eq', 'ne', 'in', 'contains', 'lt', 'lte', 'gt', 'gte', 'exists'] as const;
+const FILTER_OPERATIONS = ['eq', 'ne', 'in', 'contains', 'icontains', 'lt', 'lte', 'gt', 'gte', 'exists'] as const;
 type FilterOperation = typeof FILTER_OPERATIONS[number];
 const COMPARISON_OPERATIONS = new Set<FilterOperation>(['lt', 'lte', 'gt', 'gte']);
 
@@ -115,20 +115,21 @@ export const queryResponseArtifactTool = {
     'Query structured JSON in a large MCP result artifact without loading it into context. ' +
     'Start with describe=true to see the real keys and array lengths at a path — the inline tool ' +
     'preview is a reshaped summary, so pointers copied from it may not exist in the artifact ' +
-    '(response_meta.artifact.primary_paths lists pointers that do). responsePath uses RFC 6901. ' +
+    '(responseMeta.artifact.primaryPaths lists pointers that do). responsePath uses RFC 6901 and ' +
+    'defaults to the artifact responseRoot when omitted. ' +
     'fields accepts root names such as id or pointers such as /status/name. Arrays page by element and ' +
     'objects page by entry. For keyed maps such as n8n connections, set objectMode="entries" and filter ' +
     'on /key rather than guessing nested array paths. Use textSearch for a bounded literal search across ' +
     'large string values. Shape descriptions and result sets are pageable; request another page only when ' +
     'the current page did not answer the question. On any selected object, fields or filters may infer exactly one array child; ' +
-    'response_meta.inferred_response_path reports its full pointer, while ambiguous shapes require a more specific path. ' +
+    'responseMeta.inferredResponsePath reports its full pointer, while ambiguous shapes require a more specific path. ' +
     'Artifact handles are valid until the ' +
     'MCP server restarts, and at most 24 hours; an unknown handle means you should re-run the originating tool.',
   inputSchema: {
     type: 'object',
     properties: {
-      artifactId: { type: 'string', description: 'Opaque artifact id returned in response_meta.artifact.id' },
-      responsePath: { type: 'string', description: 'RFC 6901 pointer selecting the value to query; use an empty string for the artifact root. Fields or filters infer a child only when the selected object contains exactly one array.' },
+      artifactId: { type: 'string', description: 'Opaque artifact id returned in responseMeta.artifact.id' },
+      responsePath: { type: 'string', description: 'RFC 6901 pointer selecting the value to query. Omit it to use the artifact responseRoot; use an empty string for the full stored document. A literal / selects an empty-key property, not the root.' },
       describe: {
         type: 'boolean',
         description: 'Return the shape at responsePath (types, key names, array lengths) instead of values. Use this first when you do not know the structure.',
@@ -143,7 +144,7 @@ export const queryResponseArtifactTool = {
         type: 'array',
         maxItems: 50,
         items: { type: 'string' },
-        description: 'Optional root property names (id) or RFC 6901 pointers (/status/name) projected from each selected item. Fields that do not resolve are omitted, not returned as null; see response_meta.fields_resolved.',
+        description: 'Optional root property names (id) or RFC 6901 pointers (/status/name) projected from each selected item. Fields that do not resolve are omitted, not returned as null; see responseMeta.fieldsResolved.',
       },
       filters: {
         type: 'array',
@@ -151,8 +152,9 @@ export const queryResponseArtifactTool = {
         description: 'Optional provider-independent predicates applied to a selected array',
         items: {
           type: 'object',
+          additionalProperties: false,
           properties: {
-            path: { type: 'string', description: 'RFC 6901 pointer relative to each item' },
+            path: { type: 'string', maxLength: 500, description: 'RFC 6901 pointer relative to each item' },
             op: { type: 'string', enum: FILTER_OPERATIONS, default: 'eq' },
             value: {},
           },
@@ -172,7 +174,8 @@ export const queryResponseArtifactTool = {
       pageSize: { type: 'integer', minimum: 1, maximum: MAX_PAGE_SIZE, default: DEFAULT_PAGE_SIZE },
       cursor: { type: 'string', description: 'Opaque next cursor from the previous query page' },
     },
-    required: ['artifactId', 'responsePath'],
+    required: ['artifactId'],
+    additionalProperties: false,
   },
   annotations: { title: 'Query Response Artifact', readOnlyHint: true, idempotentHint: true, openWorldHint: false },
 };
@@ -205,7 +208,7 @@ function safeOwner(owner: string): string {
 }
 
 function encodeCursor(state: Record<string, unknown>): string {
-  const payload = Buffer.from(JSON.stringify({ v: 2, ...state }));
+  const payload = Buffer.from(JSON.stringify({ v: 3, ...state }));
   const signature = createHmac('sha256', cursorKey).update(payload).digest();
   return Buffer.concat([payload, signature]).toString('base64url');
 }
@@ -224,7 +227,7 @@ function decodeCursor(cursor: string): Record<string, any> {
     );
   }
   const decoded = JSON.parse(payload.toString('utf8')) as Record<string, any>;
-  if (decoded.v !== 2) {
+  if (decoded.v !== 3) {
     throw new ArtifactHandleError('invalid_cursor', 'Artifact cursor uses an unsupported response contract version');
   }
   return decoded;
@@ -234,12 +237,25 @@ function escapeToken(token: string): string {
   return token.replace(/~/g, '~0').replace(/\//g, '~1');
 }
 
+class JsonPointerResolutionError extends Error {
+  constructor(
+    readonly requestedPath: string,
+    readonly resolvedPath: string,
+    readonly failedToken: string,
+    readonly selectedValue: unknown,
+  ) {
+    super(`JSON pointer does not exist: ${requestedPath}`);
+    this.name = 'JsonPointerResolutionError';
+  }
+}
+
 function pointer(value: unknown, jsonPointer: string): unknown {
   if (jsonPointer === '') return value;
   if (!jsonPointer.startsWith('/')) {
     throw new Error('responsePath and filter paths must use RFC 6901 JSON pointers');
   }
   let current = value;
+  const resolvedTokens: string[] = [];
   for (const rawToken of jsonPointer.slice(1).split('/')) {
     const token = rawToken.replace(/~1/g, '/').replace(/~0/g, '~');
     if (Array.isArray(current) && /^(0|[1-9]\d*)$/.test(token) && Number(token) < current.length) {
@@ -247,14 +263,27 @@ function pointer(value: unknown, jsonPointer: string): unknown {
     } else if (current && typeof current === 'object' && Object.prototype.hasOwnProperty.call(current, token)) {
       current = (current as Record<string, unknown>)[token];
     } else {
-      throw new Error(`JSON pointer does not exist: ${jsonPointer}`);
+      const resolvedPath = resolvedTokens.length ? `/${resolvedTokens.join('/')}` : '';
+      throw new JsonPointerResolutionError(jsonPointer, resolvedPath, rawToken, current);
     }
+    resolvedTokens.push(rawToken);
   }
   return current;
 }
 
 function isMissingPointerError(error: unknown): boolean {
-  return error instanceof Error && error.message.startsWith('JSON pointer does not exist:');
+  return error instanceof JsonPointerResolutionError;
+}
+
+function invalidResponsePath(error: JsonPointerResolutionError, responseRoot: string): Error {
+  const at = error.resolvedPath === '' ? 'the document root' : `"${error.resolvedPath}"`;
+  return new Error(
+    `INVALID_RESPONSE_PATH: "${error.requestedPath}" does not exist. ` +
+    `${at} resolves to ${jsonType(error.selectedValue)} and has no "${error.failedToken}" child. ` +
+    `Available children: ${describeAvailableKeys(error.selectedValue)}. ` +
+    `Retry without responsePath to use responseRoot=${JSON.stringify(responseRoot)}, ` +
+    'or call with describe=true at a valid parent pointer.',
+  );
 }
 
 function fieldPointer(field: string): string {
@@ -348,6 +377,11 @@ function contains(actual: unknown, expected: unknown): boolean {
   return false;
 }
 
+function icontains(actual: unknown, expected: unknown): boolean {
+  if (typeof actual !== 'string' || typeof expected !== 'string') return false;
+  return actual.toLowerCase().includes(expected.toLowerCase());
+}
+
 interface FilterOutcome {
   /** The pointer resolved on this item. `exists` always counts as resolved — probing is its purpose. */
   resolved: boolean;
@@ -380,6 +414,7 @@ function evaluateFilter(item: unknown, filter: ResponseFilter): FilterOutcome {
     return { resolved: true, comparable: true, matched: filter.value.some(value => isDeepStrictEqual(actual, value)) };
   }
   if (op === 'contains') return { resolved: true, comparable: true, matched: contains(actual, filter.value) };
+  if (op === 'icontains') return { resolved: true, comparable: true, matched: icontains(actual, filter.value) };
 
   // Strings compare lexicographically (correct for ISO-8601); a mismatched pair is
   // reported not-comparable rather than silently failing every item.
@@ -404,7 +439,7 @@ function applyFilters(items: unknown[], filters: ResponseFilter[]): { kept: unkn
   const stats: FilterStat[] = filters.map(filter => ({
     path: filter.path,
     op: filter.op ?? 'eq',
-    resolved_on: 0,
+    resolvedOn: 0,
     matched: 0,
   }));
   const comparableOn = filters.map(() => 0);
@@ -414,7 +449,7 @@ function applyFilters(items: unknown[], filters: ResponseFilter[]): { kept: unkn
     // Every filter is evaluated for every item (no short-circuit) so the counts are honest.
     for (let index = 0; index < filters.length; index += 1) {
       const outcome = evaluateFilter(item, filters[index]);
-      if (outcome.resolved) stats[index].resolved_on += 1;
+      if (outcome.resolved) stats[index].resolvedOn += 1;
       if (outcome.comparable) comparableOn[index] += 1;
       if (outcome.matched) stats[index].matched += 1;
       else all = false;
@@ -423,7 +458,7 @@ function applyFilters(items: unknown[], filters: ResponseFilter[]): { kept: unkn
   });
 
   if (items.length > 0) {
-    const unresolved = stats.filter(stat => stat.resolved_on === 0);
+    const unresolved = stats.filter(stat => stat.resolvedOn === 0);
     if (unresolved.length > 0) {
       throw new Error(
         `filter path did not resolve on any of the ${items.length} selected items: ` +
@@ -463,19 +498,19 @@ const DEFAULT_COMPACT_LIMITS: CompactLimits = { depth: 4, arrayItems: 3, objectK
  */
 function compactWith(value: unknown, limits: CompactLimits, depth = 0): unknown {
   if (Array.isArray(value)) {
-    if (depth >= limits.depth) return { _omitted_array: value.length };
+    if (depth >= limits.depth) return { _omittedArray: value.length };
     const kept: unknown[] = value.slice(0, limits.arrayItems).map(item => compactWith(item, limits, depth + 1));
-    if (value.length > limits.arrayItems) kept.push({ _omitted_items: value.length - limits.arrayItems });
+    if (value.length > limits.arrayItems) kept.push({ _omittedItems: value.length - limits.arrayItems });
     return kept;
   }
   if (value && typeof value === 'object') {
     const entries = Object.entries(value as Record<string, unknown>);
-    if (depth >= limits.depth) return { _omitted_object: entries.length };
+    if (depth >= limits.depth) return { _omittedObject: entries.length };
     const result: Record<string, unknown> = {};
     for (const [key, child] of entries.slice(0, limits.objectKeys)) {
       result[key] = compactWith(child, limits, depth + 1);
     }
-    if (entries.length > limits.objectKeys) result._omitted_fields = entries.length - limits.objectKeys;
+    if (entries.length > limits.objectKeys) result._omittedFields = entries.length - limits.objectKeys;
     return result;
   }
   if (typeof value === 'string' && value.length > limits.stringChars) {
@@ -498,9 +533,9 @@ function compactToBudget(value: unknown, budget: number, wrap: (compacted: unkno
     if (emittedBytes(wrap(compacted)) <= budget) return compacted;
   }
   return {
-    _summary_unavailable: 'value is too large to summarize within the inline budget',
+    _summaryUnavailable: 'value is too large to summarize within the inline budget',
     _type: jsonType(value),
-    _next_step: 'query a narrower responsePath, project fewer fields, or use textSearch for large strings',
+    _nextStep: 'query a narrower responsePath, project fewer fields, or use textSearch for large strings',
   };
 }
 
@@ -544,10 +579,10 @@ function describeSelection(
     return { shape: {
       type,
       length: selected.length,
-      sampled_items: Math.min(selected.length, sampleSize),
-      item_type: selected.length ? jsonType(selected[0]) : null,
-      item_keys: page,
-      note: 'item_keys pointers are relative to each item — use them for filters[].path and fields.',
+      sampledItems: Math.min(selected.length, sampleSize),
+      itemType: selected.length ? jsonType(selected[0]) : null,
+      itemKeys: page,
+      note: 'itemKeys pointers are relative to each item — use them for filters[].path and fields.',
     }, total: keys.length, returned: page.length };
   }
   if (selected && typeof selected === 'object') {
@@ -559,7 +594,7 @@ function describeSelection(
       }));
     return { shape: {
       type,
-      entry_count: entries.length,
+      entryCount: entries.length,
       keys: page,
       note: 'keys pointers are absolute RFC 6901 pointers from the artifact root.',
     }, total: entries.length, returned: page.length };
@@ -628,14 +663,14 @@ function completionMetadata(
   returnedCount: number | null,
   totalCount: number | null,
   offset = 0,
-): Pick<ResponseMeta, 'complete' | 'remaining_count' | 'warning'> {
+): Pick<ResponseMeta, 'complete' | 'remainingCount' | 'warning'> {
   return {
     complete: !truncated,
-    remaining_count: totalCount !== null && returnedCount !== null
+    remainingCount: totalCount !== null && returnedCount !== null
       ? Math.max(totalCount - offset - returnedCount, 0)
       : null,
     warning: truncated
-      ? 'INCOMPLETE RESULT: do not treat the visible response as exhaustive; follow next_cursor until it is null or query the response artifact.'
+      ? 'INCOMPLETE RESULT: do not treat the visible response as exhaustive; follow nextCursor until it is null or query the response artifact.'
       : null,
   };
 }
@@ -691,13 +726,13 @@ function compactToolValue(toolName: string, value: unknown): unknown {
           active: workflow.active,
           nodeCount: nodes.length,
           // Not pre-sliced: compactToBudget is the single truncation point, so exactly one
-          // _omitted_items marker appears and it reconciles against nodeCount.
+          // _omittedItems marker appears and it reconciles against nodeCount.
           nodes: nodes.map((node: Record<string, unknown>) => ({
             id: node.id, name: node.name, type: node.type, typeVersion: node.typeVersion, disabled: node.disabled,
           })),
           connectionCount: edges.length + omitted,
           connections: edges,
-          connections_omitted: omitted,
+          connectionsOmitted: omitted,
         },
       };
     }
@@ -721,7 +756,7 @@ function compactToolValue(toolName: string, value: unknown): unknown {
           })),
           returned: Math.min(executions.length, DEFAULT_PAGE_SIZE),
           // Size of the upstream page, not a global total.
-          page_count: executions.length,
+          pageCount: executions.length,
           nextCursor: data.nextCursor,
           hasMore: executions.length > DEFAULT_PAGE_SIZE || Boolean(data.nextCursor),
         },
@@ -751,26 +786,28 @@ function atomicWrite(destination: string, content: Buffer): void {
 }
 
 interface ArtifactMetadata {
+  contractVersion: 3;
   owner: string;
-  media_type: string;
-  byte_length: number;
+  mediaType: string;
+  byteLength: number;
   sha256: string;
-  expires_at: string;
-  primary_paths?: string[];
-  source_truncated?: boolean;
+  expiresAt: string;
+  responseRoot: '';
+  primaryPaths?: string[];
+  sourceTruncated?: boolean;
 }
 
 function artifactReference(artifactId: string, metadata: ArtifactMetadata): ArtifactReference {
   return {
     id: artifactId,
-    media_type: metadata.media_type,
-    byte_length: metadata.byte_length,
+    mediaType: metadata.mediaType,
+    byteLength: metadata.byteLength,
     sha256: metadata.sha256,
-    expires_at: metadata.expires_at,
-    query_tool: 'query_response_artifact',
-    response_root: '/',
-    primary_paths: metadata.primary_paths ?? [],
-    source_truncated: metadata.source_truncated ?? false,
+    expiresAt: metadata.expiresAt,
+    queryTool: 'query_response_artifact',
+    responseRoot: metadata.responseRoot,
+    primaryPaths: metadata.primaryPaths ?? [],
+    sourceTruncated: metadata.sourceTruncated ?? false,
   };
 }
 
@@ -784,6 +821,12 @@ function loadMetadata(artifactId: string, owner: string): { dataPath: string; me
     );
   }
   const metadata = JSON.parse(readFileSync(target.meta, 'utf8')) as ArtifactMetadata;
+  if (metadata.contractVersion !== 3) {
+    throw new ArtifactHandleError(
+      'unknown',
+      'Response artifact uses an unsupported contract version; re-run the tool that produced it.',
+    );
+  }
   if (metadata.owner !== safeOwner(owner)) {
     throw new ArtifactHandleError(
       'wrong_scope',
@@ -791,13 +834,13 @@ function loadMetadata(artifactId: string, owner: string): { dataPath: string; me
       're-run the originating tool on this connection to mint an artifact in this scope.',
     );
   }
-  if (Date.parse(metadata.expires_at) <= Date.now()) {
+  if (Date.parse(metadata.expiresAt) <= Date.now()) {
     unlinkSync(target.data);
     unlinkSync(target.meta);
     if (parsedArtifact?.artifactId === artifactId) parsedArtifact = null;
     throw new ArtifactHandleError(
       'expired',
-      `Response artifact handle expired at ${metadata.expires_at}. ` +
+      `Response artifact handle expired at ${metadata.expiresAt}. ` +
       're-run the tool that produced it to mint a new artifact.',
     );
   }
@@ -878,13 +921,15 @@ export function persistResponseArtifact(value: unknown, owner: string, encoded?:
   const target = paths(id);
   const expiresAt = new Date(Date.now() + DEFAULT_ARTIFACT_TTL_MS).toISOString();
   const metadata: ArtifactMetadata = {
+    contractVersion: 3,
     owner: scopedOwner,
-    media_type: 'application/json',
-    byte_length: content.length,
+    mediaType: 'application/json',
+    byteLength: content.length,
     sha256: digest,
-    expires_at: expiresAt,
-    primary_paths: primaryPaths(value),
-    source_truncated: detectSourceTruncation(value),
+    expiresAt,
+    responseRoot: '',
+    primaryPaths: primaryPaths(value),
+    sourceTruncated: detectSourceTruncation(value),
   };
 
   const reused = existsSync(target.data) && existsSync(target.meta);
@@ -904,8 +949,8 @@ export function persistResponseArtifact(value: unknown, owner: string, encoded?:
     bytes: content.length,
     reused,
     root,
-    primaryPaths: metadata.primary_paths,
-    sourceTruncated: metadata.source_truncated,
+    primaryPaths: metadata.primaryPaths,
+    sourceTruncated: metadata.sourceTruncated,
   });
   return artifactReference(id, metadata);
 }
@@ -927,8 +972,8 @@ interface TextSearchMatch {
   pointer: string;
   offset: number;
   context: string;
-  context_start: number;
-  context_end: number;
+  contextStart: number;
+  contextEnd: number;
 }
 
 const TEXT_SEARCH_MAX_MATCHES = 20;
@@ -969,8 +1014,8 @@ function searchStringValues(
           pointer: at || '',
           offset,
           context: value.slice(contextStart, contextEnd),
-          context_start: contextStart,
-          context_end: contextEnd,
+          contextStart,
+          contextEnd,
         });
         from = offset + Math.max(needle.length, 1);
       }
@@ -1033,7 +1078,7 @@ function objectModeRequired(
   const suggestion = objectModeSuggestion(artifactId, responsePath, pageSize, fields, filters);
   return new Error(
     `OBJECT_MODE_REQUIRED: ${responsePath || '/'} selects a keyed JSON object, not an array. ` +
-    `Query its entries and filter /key or fields beneath /value. suggested_request=${JSON.stringify(suggestion)}`,
+    `Query its entries and filter /key or fields beneath /value. suggestedRequest=${JSON.stringify(suggestion)}`,
   );
 }
 
@@ -1047,7 +1092,7 @@ function isKeyedObject(value: unknown): boolean {
 
 export function queryResponseArtifact(
   artifactId: string,
-  responsePath: string,
+  responsePath: string | undefined,
   fields: string[] | undefined,
   filters: ResponseFilter[] | undefined,
   pageSize: number,
@@ -1073,9 +1118,18 @@ export function queryResponseArtifact(
 
   const { dataPath, metadata } = loadMetadata(artifactId, owner);
   const document = loadDocument(artifactId, dataPath);
-  const sourceTruncated = metadata.source_truncated ?? false;
+  responsePath = responsePath ?? metadata.responseRoot;
+  const sourceTruncated = metadata.sourceTruncated ?? false;
 
-  let selected = pointer(document, responsePath);
+  let selected: unknown;
+  try {
+    selected = pointer(document, responsePath);
+  } catch (error) {
+    if (error instanceof JsonPointerResolutionError) {
+      throw invalidResponsePath(error, metadata.responseRoot);
+    }
+    throw error;
+  }
   let inferredResponsePath: string | undefined;
 
   if (textSearch !== undefined) {
@@ -1084,28 +1138,28 @@ export function queryResponseArtifact(
     }
     const searched = searchStringValues(selected, responsePath, textSearch);
     const meta: ResponseMeta = {
-      contract_version: 2,
+      contractVersion: 3,
       truncated: searched.truncated,
       complete: !searched.truncated,
-      truncation_reason: searched.truncated ? 'match_limit' : null,
-      returned_count: searched.matches.length,
-      total_count: searched.truncated ? null : searched.matches.length,
-      remaining_count: null,
-      next_cursor: null,
-      serialized_bytes: 0,
-      page_unit: 'items',
-      source_truncated: sourceTruncated,
+      truncationReason: searched.truncated ? 'match_limit' : null,
+      returnedCount: searched.matches.length,
+      totalCount: searched.truncated ? null : searched.matches.length,
+      remainingCount: null,
+      nextCursor: null,
+      serializedBytes: 0,
+      pageUnit: 'items',
+      sourceTruncated,
       warning: searched.truncated
         ? `More than ${TEXT_SEARCH_MAX_MATCHES} matches exist; narrow responsePath or use a more specific literal.`
         : null,
     };
     const result = {
-      artifact_id: artifactId,
-      response_path: responsePath,
+      artifactId,
+      responsePath,
       response: searched.matches,
-      response_meta: meta,
+      responseMeta: meta,
     };
-    meta.serialized_bytes = emittedBytes(result);
+    meta.serializedBytes = emittedBytes(result);
     return result;
   }
 
@@ -1117,7 +1171,7 @@ export function queryResponseArtifact(
       throw new Error('describe cannot be combined with objectMode');
     }
     const viewHash = createHash('sha256').update(encode({
-      contractVersion: 2,
+      contractVersion: 3,
       artifactId,
       responsePath,
       describe: true,
@@ -1140,23 +1194,23 @@ export function queryResponseArtifact(
       ? encodeCursor({ artifactId, owner: safeOwner(owner), viewHash, offset: nextOffset })
       : null;
     const result = {
-      artifact_id: artifactId,
-      response_path: responsePath,
+      artifactId,
+      responsePath,
       shape: described.shape,
-      response_meta: {
-        contract_version: 2,
+      responseMeta: {
+        contractVersion: 3,
         truncated: nextCursor !== null,
-        truncation_reason: nextCursor ? 'page_limit' : null,
-        returned_count: described.returned,
-        total_count: described.total,
-        next_cursor: nextCursor,
-        serialized_bytes: 0,
-        page_unit: 'entries' as const,
-        source_truncated: sourceTruncated,
+        truncationReason: nextCursor ? 'page_limit' : null,
+        returnedCount: described.returned,
+        totalCount: described.total,
+        nextCursor,
+        serializedBytes: 0,
+        pageUnit: 'entries' as const,
+        sourceTruncated,
         ...completionMetadata(nextCursor !== null, described.returned, described.total, offset),
       } satisfies ResponseMeta,
     };
-    result.response_meta.serialized_bytes = emittedBytes(result);
+    result.responseMeta.serializedBytes = emittedBytes(result);
     return result;
   }
 
@@ -1212,7 +1266,7 @@ export function queryResponseArtifact(
   }
 
   const viewHash = createHash('sha256').update(encode({
-    contractVersion: 2,
+    contractVersion: 3,
     artifactId,
     responsePath,
     objectMode: objectMode ?? null,
@@ -1269,32 +1323,32 @@ export function queryResponseArtifact(
   if (selection.kind === 'scalar') {
     const build = (response: unknown, truncated: boolean) => {
       const meta: ResponseMeta = {
-        contract_version: 2,
+        contractVersion: 3,
         truncated,
-        truncation_reason: truncated ? 'scalar_size_limit' : null,
-        returned_count: null,
-        total_count: null,
-        next_cursor: null,
-        serialized_bytes: 0,
-        source_truncated: sourceTruncated,
+        truncationReason: truncated ? 'scalar_size_limit' : null,
+        returnedCount: null,
+        totalCount: null,
+        nextCursor: null,
+        serializedBytes: 0,
+        sourceTruncated,
         ...completionMetadata(truncated, null, null),
       };
-      if (filterStats) meta.filters_applied = filterStats;
-      if (fieldsResolved) meta.fields_resolved = fieldsResolved;
-      if (inferredResponsePath) meta.inferred_response_path = inferredResponsePath;
+      if (filterStats) meta.filtersApplied = filterStats;
+      if (fieldsResolved) meta.fieldsResolved = fieldsResolved;
+      if (inferredResponsePath) meta.inferredResponsePath = inferredResponsePath;
       const notes = [...unitWarnings];
       if (truncated) notes.push('The selected value exceeded the inline budget; query a narrower responsePath or use textSearch for a literal within large strings.');
       if (notes.length) meta.warning = [meta.warning, ...notes].filter(Boolean).join(' ');
-      return { artifact_id: artifactId, response_path: responsePath, response, response_meta: meta };
+      return { artifactId, responsePath, response, responseMeta: meta };
     };
     const direct = build(selection.value, false);
     if (emittedBytes(direct) <= INLINE_RESULT_BYTES) {
-      direct.response_meta.serialized_bytes = emittedBytes(direct);
+      direct.responseMeta.serializedBytes = emittedBytes(direct);
       return direct;
     }
     const compacted = compactToBudget(selection.value, INLINE_RESULT_BYTES, value => build(value, true));
     const result = build(compacted, true);
-    result.response_meta.serialized_bytes = emittedBytes(result);
+    result.responseMeta.serializedBytes = emittedBytes(result);
     return result;
   }
 
@@ -1308,20 +1362,20 @@ export function queryResponseArtifact(
   const build = (response: unknown, returnedCount: number, nextCursor: string | null, truncationReason: string | null) => {
     const truncated = nextCursor !== null || truncationReason !== null;
     const meta: ResponseMeta = {
-      contract_version: 2,
+      contractVersion: 3,
       truncated,
-      truncation_reason: truncationReason,
-      returned_count: returnedCount,
-      total_count: totalCount,
-      next_cursor: nextCursor,
-      serialized_bytes: 0,
-      page_unit: pageUnit,
-      source_truncated: sourceTruncated,
+      truncationReason,
+      returnedCount,
+      totalCount,
+      nextCursor,
+      serializedBytes: 0,
+      pageUnit,
+      sourceTruncated,
       ...completionMetadata(truncated, returnedCount, totalCount, offset),
     };
-    if (filterStats) meta.filters_applied = filterStats;
-    if (fieldsResolved) meta.fields_resolved = fieldsResolved;
-    if (inferredResponsePath) meta.inferred_response_path = inferredResponsePath;
+    if (filterStats) meta.filtersApplied = filterStats;
+    if (fieldsResolved) meta.fieldsResolved = fieldsResolved;
+    if (inferredResponsePath) meta.inferredResponsePath = inferredResponsePath;
     const notes = [...unitWarnings];
     if (truncationReason === 'item_size_limit') {
       notes.push(
@@ -1331,7 +1385,7 @@ export function queryResponseArtifact(
       );
     }
     if (notes.length) meta.warning = [meta.warning, ...notes].filter(Boolean).join(' ');
-    return { artifact_id: artifactId, response_path: responsePath, response, response_meta: meta };
+    return { artifactId, responsePath, response, responseMeta: meta };
   };
 
   if (offset > totalCount) {
@@ -1389,7 +1443,7 @@ export function queryResponseArtifact(
   reason = reason ?? (nextCursor ? (returnedCount === pageSize ? 'page_limit' : 'size_limit') : null);
 
   const result = build(page, returnedCount, nextCursor, reason);
-  result.response_meta.serialized_bytes = emittedBytes(result);
+  result.responseMeta.serializedBytes = emittedBytes(result);
   if (emittedBytes(result) > HARD_RESULT_BYTES) {
     throw new Error('Bounded artifact query exceeded its hard serialized-size limit');
   }
@@ -1400,14 +1454,14 @@ export function queryResponseArtifact(
     offset,
     returnedCount,
     totalCount,
-    serialized: result.response_meta.serialized_bytes,
+    serialized: result.responseMeta.serializedBytes,
   });
   return result;
 }
 
 export function boundToolResult(toolName: string, value: unknown, owner: string): unknown {
   // Self-bounded tools shape their own replies against this same budget; re-bounding them
-  // re-artifacts the reply and nulls its next_cursor, so a caller stops paging early.
+  // re-artifacts the reply and nulls its nextCursor, so a caller stops paging early.
   if (SELF_BOUNDED_TOOLS.has(toolName)) return value;
 
   // Indentation only grows a document, so an over-budget compact form settles the
@@ -1416,25 +1470,25 @@ export function boundToolResult(toolName: string, value: unknown, owner: string)
   if (compactBytes.length <= INLINE_RESULT_BYTES && emittedBytes(value) <= INLINE_RESULT_BYTES) return value;
   // Hand the already-serialized buffer over rather than stringifying the payload twice.
   const artifact = persistResponseArtifact(value, owner, compactBytes);
-  const sourceTruncated = artifact.source_truncated;
-  const pathHint = artifact.primary_paths.length
-    ? ` Query these artifact paths rather than pointers copied from the summary: ${artifact.primary_paths.join(', ')}.`
+  const sourceTruncated = artifact.sourceTruncated;
+  const pathHint = artifact.primaryPaths.length
+    ? ` Query these artifact paths rather than pointers copied from the summary: ${artifact.primaryPaths.join(', ')}.`
     : '';
   const bounded = {
     success: typeof value === 'object' && value !== null && 'success' in value
       ? Boolean((value as Record<string, unknown>).success)
       : true,
     data: compactToolValue(toolName, value) as unknown,
-    response_meta: {
-      contract_version: 2,
+    responseMeta: {
+      contractVersion: 3,
       truncated: true,
-      truncation_reason: 'size_limit',
-      returned_count: null,
-      total_count: null,
-      next_cursor: null,
-      serialized_bytes: 0,
+      truncationReason: 'size_limit',
+      returnedCount: null,
+      totalCount: null,
+      nextCursor: null,
+      serializedBytes: 0,
       artifact,
-      source_truncated: sourceTruncated,
+      sourceTruncated,
       ...completionMetadata(true, null, null),
     } satisfies ResponseMeta,
     guidance:
@@ -1447,15 +1501,15 @@ export function boundToolResult(toolName: string, value: unknown, owner: string)
   if (emittedBytes(bounded) > PREVIEW_RESULT_BYTES) {
     bounded.data = compactToBudget(bounded.data, PREVIEW_RESULT_BYTES, compacted => ({ ...bounded, data: compacted }));
   }
-  bounded.response_meta.serialized_bytes = emittedBytes(bounded);
+  bounded.responseMeta.serializedBytes = emittedBytes(bounded);
   if (emittedBytes(bounded) > HARD_RESULT_BYTES) {
     throw new Error('Bounded MCP result exceeded its hard serialized-size limit');
   }
   logger.debug('Bounded oversized MCP tool result', {
     tool: toolName,
     artifactId: artifact.id,
-    artifactBytes: artifact.byte_length,
-    inlineBytes: bounded.response_meta.serialized_bytes,
+    artifactBytes: artifact.byteLength,
+    inlineBytes: bounded.responseMeta.serializedBytes,
   });
   return bounded;
 }
