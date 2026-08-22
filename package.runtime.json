@@ -24,6 +24,9 @@
   "engines": {
     "node": ">=20.0.0"
   },
+  "allowScripts": {
+    "better-sqlite3": true
+  },
   "optionalDependencies": {
     "better-sqlite3": "^11.10.0"
   }
