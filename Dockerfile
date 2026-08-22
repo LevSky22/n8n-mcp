@@ -49,11 +49,13 @@ RUN --mount=type=cache,target=/root/.npm \
     apk add --no-cache python3 make g++ && \
     npm install -g npm@12.0.2 && \
     npm install --prefix /tmp/npm-security-patches --no-package-lock --ignore-scripts --no-audit --no-fund \
-        brace-expansion@5.0.9 ip-address@10.3.1 && \
+        brace-expansion@5.0.9 ip-address@10.3.1 tar@7.5.21 && \
     rm -rf /usr/local/lib/node_modules/npm/node_modules/brace-expansion \
-        /usr/local/lib/node_modules/npm/node_modules/ip-address && \
+        /usr/local/lib/node_modules/npm/node_modules/ip-address \
+        /usr/local/lib/node_modules/npm/node_modules/tar && \
     cp -a /tmp/npm-security-patches/node_modules/brace-expansion \
         /tmp/npm-security-patches/node_modules/ip-address \
+        /tmp/npm-security-patches/node_modules/tar \
         /usr/local/lib/node_modules/npm/node_modules/ && \
     rm -rf /tmp/npm-security-patches && \
     npm install --production --no-audit --no-fund && \
