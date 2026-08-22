@@ -74,7 +74,7 @@ describe('response artifact MCP tool', () => {
     const server = new TestableN8NMCPServer();
     expect(server.testFindToolSchema('query_response_artifact')).toMatchObject({
       name: 'query_response_artifact',
-      inputSchema: { required: ['artifactId', 'responsePath'] },
+      inputSchema: { required: ['artifactId'], additionalProperties: false },
       annotations: { readOnlyHint: true, idempotentHint: true },
     });
   });
@@ -100,11 +100,11 @@ describe('response artifact MCP tool', () => {
     const result = JSON.parse(response.content[0].text);
 
     expect(result.response).toEqual([{ id: 1 }, { id: 2 }]);
-    expect(result.response_meta).toMatchObject({
+    expect(result.responseMeta).toMatchObject({
       complete: true,
-      returned_count: 2,
-      total_count: 2,
-      remaining_count: 0,
+      returnedCount: 2,
+      totalCount: 2,
+      remainingCount: 0,
     });
   });
 
@@ -126,20 +126,24 @@ describe('response artifact MCP tool', () => {
     });
 
     expect(result.response).toHaveLength(20);
-    expect(result.response_meta).toMatchObject({
-      returned_count: 20,
-      total_count: 25,
+    expect(result.responseMeta).toMatchObject({
+      returnedCount: 20,
+      totalCount: 25,
       complete: false,
     });
   });
 
-  it('requires query artifact id and response path', async () => {
+  it('requires an artifact id and defaults an omitted response path to the artifact root', async () => {
     const server = new TestableN8NMCPServer();
     await expect(server.testExecuteTool('query_response_artifact', {})).rejects.toThrow(
       'artifactId is required',
     );
-    await expect(server.testExecuteTool('query_response_artifact', { artifactId: 'a'.repeat(20) })).rejects.toThrow(
-      'responsePath is required',
-    );
+    const artifact = persistResponseArtifact('root text', 'default-instance');
+    const result = await server.testExecuteTool('query_response_artifact', { artifactId: artifact.id }) as any;
+    expect(result).toMatchObject({ artifactId: artifact.id, responsePath: '', response: 'root text' });
+    await expect(server.testExecuteTool('query_response_artifact', {
+      artifactId: artifact.id,
+      responsePath: 42,
+    })).rejects.toThrow('responsePath must be an RFC 6901 string');
   });
 });

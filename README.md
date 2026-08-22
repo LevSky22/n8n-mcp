@@ -71,13 +71,13 @@ Want to use n8n-MCP with your n8n instance? Check out our comprehensive [n8n Dep
 
 Compact JSON tool results stay inline up to a conservative 32 KiB budget. Larger workflow,
 execution, documentation, and host-injected tool results return a compact
-preview capped at 8 KiB plus `response_meta.artifact`. Prefer `query_response_artifact` to
+preview capped at 8 KiB plus `responseMeta.artifact`. Prefer `query_response_artifact` to
 select, filter, project, search, and paginate structured JSON without loading the full
 artifact into model context. Artifact query paths use RFC 6901, while projected fields accept
 either root names such as `id` or pointers such as `/status/name`. When fields
 or filters target an object containing exactly one array child,
 the query selects that collection and reports its pointer as
-`response_meta.inferred_response_path`; ambiguous objects still require a
+`responseMeta.inferredResponsePath`; ambiguous objects still require a
 more specific path. Use
 `objectMode: "entries"` to query keyed objects (including native n8n connection
 maps) as `{key, value}` rows; filters can then select several keys in one call.
@@ -86,14 +86,14 @@ objects. `textSearch` performs bounded literal search across large string values
 Artifact-query arguments are strict camelCase: `artifactId`, `responsePath`,
 `fields`, `filters`, `pageSize`, `cursor`, `describe`, `objectMode`, and
 `textSearch`. `pageSize` accepts 1-100 only. To continue beyond 100 matching
-items, pass `response_meta.next_cursor` as `cursor` and keep every other
+items, pass `responseMeta.nextCursor` as `cursor` and keep every other
 query-view argument unchanged; snake_case variants are rejected.
-Query pages use response contract version 2 and do not repeat
+Query pages use response contract version 3 and do not repeat
 the full artifact descriptor minted by the originating tool. The full serialized MCP result is capped at
 128 KiB, artifacts are capped at 50 MiB, expire after 24 hours, and are pruned
 at a 1 GiB quota.
 
-Every bounded result reports `response_meta.complete`, returned/total/remaining
+Every bounded result reports `responseMeta.complete`, returned/total/remaining
 counts, and an opaque next cursor. A compact preview is never exhaustive when
 `complete` is false, even if an upstream payload says it is on its last page.
 Request another semantic page only when the current page did not answer the question.

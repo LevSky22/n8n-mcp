@@ -1730,8 +1730,8 @@ export class N8NDocumentationMCPServer {
       if (!args.artifactId || typeof args.artifactId !== 'string') {
         throw new Error('artifactId is required');
       }
-      if (typeof args.responsePath !== 'string') {
-        throw new Error('responsePath is required');
+      if (args.responsePath !== undefined && typeof args.responsePath !== 'string') {
+        throw new Error('responsePath must be an RFC 6901 string when provided');
       }
       const owner = this.instanceContext ? getInstanceScopeId(this.instanceContext) : 'default-instance';
       return queryResponseArtifact(
