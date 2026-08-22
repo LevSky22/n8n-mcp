@@ -122,7 +122,7 @@ export const queryResponseArtifactTool = {
     'fields accepts root names such as id or pointers such as /status/name. Arrays page by element and ' +
     'objects page by entry. For keyed maps such as n8n connections, set objectMode="entries" and filter ' +
     'on /key rather than guessing nested array paths. Use textSearch for a bounded literal search across ' +
-    'large string values. Shape descriptions and result sets are pageable; pass response_meta.next_cursor ' +
+    'large string values. Shape descriptions and result sets are pageable; pass responseMeta.nextCursor ' +
     'back as cursor while keeping responsePath, fields, filters, pageSize, describe, objectMode, and textSearch unchanged. ' +
     'Request another page only when ' +
     'the current page did not answer the question. On any selected object, fields or filters may infer exactly one array child; ' +
@@ -176,7 +176,7 @@ export const queryResponseArtifactTool = {
         required: ['query'],
       },
       pageSize: { type: 'integer', minimum: 1, maximum: MAX_PAGE_SIZE, default: DEFAULT_PAGE_SIZE, description: 'Elements or entries per page, 1-100. Use cursor for additional pages instead of requesting more than 100.' },
-      cursor: { type: 'string', description: 'Opaque response_meta.next_cursor from the previous query page. Keep every other query-view argument unchanged.' },
+      cursor: { type: 'string', description: 'Opaque responseMeta.nextCursor from the previous query page. Keep every other query-view argument unchanged.' },
     },
     required: ['artifactId'],
     additionalProperties: false,

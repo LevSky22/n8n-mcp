@@ -88,7 +88,7 @@ Arrays page by element and objects page by entry.`,
       cursor: {
         type: 'string',
         required: false,
-        description: 'Opaque response_meta.next_cursor from the previous query page. Keep every other query-view argument unchanged.'
+        description: 'Opaque responseMeta.nextCursor from the previous query page. Keep every other query-view argument unchanged.'
       }
     },
     returns:
@@ -97,7 +97,7 @@ Arrays page by element and objects page by entry.`,
       'query_response_artifact({artifactId: "a1b2c3", describe: true}) - describe the advertised default response root',
       'query_response_artifact({artifactId: "a1b2c3", responsePath: "/data", describe: true}) - array length and item shape before paging',
       'query_response_artifact({artifactId: "a1b2c3", responsePath: "/data", fields: ["id", "/status/name"], pageSize: 50}) - project two fields per element',
-      'query_response_artifact({artifactId: "a1b2c3", responsePath: "/data", fields: ["id"], pageSize: 100, cursor: "<response_meta.next_cursor>"}) - fetch the next page without exceeding the page-size limit',
+      'query_response_artifact({artifactId: "a1b2c3", responsePath: "/data", fields: ["id"], pageSize: 100, cursor: "<responseMeta.nextCursor>"}) - fetch the next page without exceeding the page-size limit',
       'query_response_artifact({artifactId: "a1b2c3", responsePath: "/data", filters: [{path: "/status/name", op: "eq", value: "error"}]}) - select failing entries only',
       'query_response_artifact({artifactId: "a1b2c3", responsePath: "/data", textSearch: {query: "timeout"}}) - find a literal inside large strings without returning the full payload'
     ],
