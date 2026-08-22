@@ -113,6 +113,8 @@ export const queryResponseArtifactTool = {
   name: 'query_response_artifact',
   description:
     'Query structured JSON in a large MCP result artifact without loading it into context. ' +
+    'Use the exact camelCase arguments artifactId, responsePath, fields, filters, pageSize, cursor, ' +
+    'describe, objectMode, and textSearch; snake_case names are invalid. pageSize accepts 1-100 only. ' +
     'Start with describe=true to see the real keys and array lengths at a path — the inline tool ' +
     'preview is a reshaped summary, so pointers copied from it may not exist in the artifact ' +
     '(responseMeta.artifact.primaryPaths lists pointers that do). responsePath uses RFC 6901 and ' +
@@ -120,7 +122,9 @@ export const queryResponseArtifactTool = {
     'fields accepts root names such as id or pointers such as /status/name. Arrays page by element and ' +
     'objects page by entry. For keyed maps such as n8n connections, set objectMode="entries" and filter ' +
     'on /key rather than guessing nested array paths. Use textSearch for a bounded literal search across ' +
-    'large string values. Shape descriptions and result sets are pageable; request another page only when ' +
+    'large string values. Shape descriptions and result sets are pageable; pass responseMeta.nextCursor ' +
+    'back as cursor while keeping responsePath, fields, filters, pageSize, describe, objectMode, and textSearch unchanged. ' +
+    'Request another page only when ' +
     'the current page did not answer the question. On any selected object, fields or filters may infer exactly one array child; ' +
     'responseMeta.inferredResponsePath reports its full pointer, while ambiguous shapes require a more specific path. ' +
     'Artifact handles are valid until the ' +
@@ -171,8 +175,8 @@ export const queryResponseArtifactTool = {
         },
         required: ['query'],
       },
-      pageSize: { type: 'integer', minimum: 1, maximum: MAX_PAGE_SIZE, default: DEFAULT_PAGE_SIZE },
-      cursor: { type: 'string', description: 'Opaque next cursor from the previous query page' },
+      pageSize: { type: 'integer', minimum: 1, maximum: MAX_PAGE_SIZE, default: DEFAULT_PAGE_SIZE, description: 'Elements or entries per page, 1-100. Use cursor for additional pages instead of requesting more than 100.' },
+      cursor: { type: 'string', description: 'Opaque responseMeta.nextCursor from the previous query page. Keep every other query-view argument unchanged.' },
     },
     required: ['artifactId'],
     additionalProperties: false,

@@ -83,6 +83,11 @@ more specific path. Use
 maps) as `{key, value}` rows; filters can then select several keys in one call.
 `describe: true` pages shape metadata and returns absolute child pointers for
 objects. `textSearch` performs bounded literal search across large string values.
+Artifact-query arguments are strict camelCase: `artifactId`, `responsePath`,
+`fields`, `filters`, `pageSize`, `cursor`, `describe`, `objectMode`, and
+`textSearch`. `pageSize` accepts 1-100 only. To continue beyond 100 matching
+items, pass `responseMeta.nextCursor` as `cursor` and keep every other query-view
+argument unchanged; snake_case variants are rejected.
 Query pages use response contract version 3 and do not repeat
 the full artifact descriptor minted by the originating tool. The full serialized MCP result is capped at
 128 KiB, artifacts are capped at 50 MiB, expire after 24 hours, and are pruned

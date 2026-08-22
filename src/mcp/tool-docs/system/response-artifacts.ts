@@ -19,12 +19,14 @@ export const queryResponseArtifactDoc: ToolDocumentation = {
       'query_response_artifact({artifactId: "a1b2c3", responsePath: "", describe: true})',
     performance: 'Fast - reads a stored artifact from disk, no n8n API call',
     tips: [
+      'Use only the camelCase argument names artifactId, responsePath, fields, filters, pageSize, cursor, describe, objectMode, and textSearch. Snake_case variants are invalid.',
       'Call with describe=true first. The inline preview you just read is a reshaped summary, so a pointer copied out of it may not exist in the artifact.',
       'responseMeta.artifact.primaryPaths lists pointers that do resolve — prefer those over guessing.',
       'Omit responsePath to use the artifact\'s advertised responseRoot (the n8n artifact root is ""). Pass responsePath: "" explicitly for the whole document.',
       'RFC 6901 treats "/" as a property whose name is empty; it is not the document root.',
       'On a selected object, fields or filters infer exactly one array child and report its full pointer as responseMeta.inferredResponsePath; ambiguous shapes still need a more specific responsePath.',
-      'Request another semantic page only when the current page did not answer the question.',
+      'pageSize is limited to 1-100. Request another semantic page only when the current page did not answer the question.',
+      'For another page, pass responseMeta.nextCursor as cursor and keep all other query-view arguments unchanged.',
       'An unknown artifactId means the handle expired or the server restarted — re-run the tool that produced it.'
     ]
   },
@@ -81,12 +83,12 @@ Arrays page by element and objects page by entry.`,
         type: 'integer',
         required: false,
         default: 20,
-        description: 'Elements or entries per page, 1-100'
+        description: 'Elements or entries per page, 1-100. Use cursor for additional pages instead of requesting more than 100.'
       },
       cursor: {
         type: 'string',
         required: false,
-        description: 'Opaque next cursor from the previous query page'
+        description: 'Opaque responseMeta.nextCursor from the previous query page. Keep every other query-view argument unchanged.'
       }
     },
     returns:
@@ -95,6 +97,7 @@ Arrays page by element and objects page by entry.`,
       'query_response_artifact({artifactId: "a1b2c3", describe: true}) - describe the advertised default response root',
       'query_response_artifact({artifactId: "a1b2c3", responsePath: "/data", describe: true}) - array length and item shape before paging',
       'query_response_artifact({artifactId: "a1b2c3", responsePath: "/data", fields: ["id", "/status/name"], pageSize: 50}) - project two fields per element',
+      'query_response_artifact({artifactId: "a1b2c3", responsePath: "/data", fields: ["id"], pageSize: 100, cursor: "<responseMeta.nextCursor>"}) - fetch the next page without exceeding the page-size limit',
       'query_response_artifact({artifactId: "a1b2c3", responsePath: "/data", filters: [{path: "/status/name", op: "eq", value: "error"}]}) - select failing entries only',
       'query_response_artifact({artifactId: "a1b2c3", responsePath: "/data", textSearch: {query: "timeout"}}) - find a literal inside large strings without returning the full payload'
     ],
@@ -112,6 +115,7 @@ Arrays page by element and objects page by entry.`,
       'Omit responsePath for the first query; use describe=true when the default root\'s shape is unfamiliar',
       'Prefer primaryPaths over pointers copied from an inline preview',
       'Request another page only when more matching results are needed',
+      'Keep responsePath, fields, filters, pageSize, describe, objectMode, and textSearch unchanged when reusing a cursor',
       'Narrow with filters and fields rather than paging everything'
     ],
     pitfalls: [
@@ -119,6 +123,7 @@ Arrays page by element and objects page by entry.`,
       'Envelope inference is deliberately limited to one array child; with zero or multiple arrays, pass a more specific responsePath',
       'Artifact handles do not survive an MCP server restart even inside the 24 hour window',
       'Treating one page as the full result: check responseMeta before summarising',
+      'Using snake_case arguments or pageSize above 100; both fail schema validation',
       'Artifacts and v3 cursors are scoped to the caller that created them; older contract cursors are rejected'
     ],
     relatedTools: ['n8n_executions', 'n8n_get_workflow']
