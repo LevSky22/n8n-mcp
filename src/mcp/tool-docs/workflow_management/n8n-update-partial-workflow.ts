@@ -64,6 +64,9 @@ n8n validates canvas groups on every write, including writes that have nothing t
 - **activateWorkflow**: Activate the workflow to enable automatic execution via triggers
 - **deactivateWorkflow**: Deactivate the workflow to prevent automatic execution
 
+n8n 2.33 renamed this to publish/unpublish - what the editor calls "Publish" is what these
+operations do, on every supported version. The operation names are unchanged.
+
 ### Project Management Operations (2 types):
 - **transferWorkflow**: Transfer the workflow to a different project. Requires \`destinationProjectId\`. Enterprise/cloud feature.
 - **moveToFolder**: Move the workflow into a folder (n8n 2.32+). Requires \`parentFolderId\`: a folder ID, or null for the project root. The placement is write-only in n8n's API - it cannot be read back, so verify in the n8n UI if needed. Manage folders with n8n_manage_folders. When combined with transferWorkflow in one request, the folder move applies in the SOURCE project before the transfer runs - use a separate moveToFolder call after the transfer instead.
@@ -459,6 +462,8 @@ n8n_update_partial_workflow({
       '**patchNodeField is strict**: it ERRORS if the find string is not found (unlike __patch_find_replace which only warns)',
       '**patchNodeField detects ambiguity**: if find matches multiple times, it ERRORS unless replaceAll: true is set',
       'When using regex: true in patchNodeField, escape special regex characters (., *, +, etc.) if you want literal matching',
+      'patchNodeField literal mode (regex not set) inserts replace verbatim, so $ needs no escaping. With regex: true, replace supports JS replacement patterns: $1 for a capture group, $$ for a literal $',
+      'Patches to parameters.jsCode or parameters.functionCode are parsed as JavaScript after applying: a patch that breaks previously-valid code fails the operation. Only the final result of one operation\'s patches array is checked, so apply dependent edits in a single operation. A leading = is stripped before parsing, matching how n8n runs these noDataExpression fields. Fields that were already invalid before patching and pythonCode are not checked; code over 1MB is never parsed, and patching valid code into something unverifiable is rejected — set the full value via updateNode (unchecked) if that is intended. The parse runs on the MCP server\'s Node.js: in the rare case it rejects newer syntax your n8n runtime accepts, set the full field value via updateNode instead (not guarded)',
       'To remove a property, set it to null in the updates object',
       'When properties are mutually exclusive (e.g., continueOnFail and onError), setting only the new property will fail - you must remove the old one with null',
       'Removing a required property may cause validation errors - check node documentation first',

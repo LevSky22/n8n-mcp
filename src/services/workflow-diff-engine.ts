@@ -183,6 +183,83 @@ function countOccurrences(str: string, search: string): number {
   return count;
 }
 
+// Fields that hold plain JavaScript: the Code node's jsCode and the legacy
+// Function/FunctionItem nodes' functionCode. Python lives in pythonCode.
+const JS_CODE_FIELD_NAMES = new Set(['jsCode', 'functionCode']);
+
+// Parses (never executes) code as an async function body, matching n8n's own
+// wrapping of Code-node JS — so top-level return/await are valid.
+const AsyncFunctionCtor = (async () => {}).constructor as new (...args: string[]) => unknown;
+
+// Parsing is synchronous on the event loop; a 60 MiB body costs ~1s. Real
+// Code-node sources are kilobytes — beyond this the code is never parsed,
+// so oversized input cannot become a DoS lever (Codex review on #1014).
+const MAX_SYNTAX_CHECKED_LENGTH = 1_000_000;
+
+type JsSyntaxCheck =
+  | { status: 'valid' }
+  | { status: 'invalid'; message: string }
+  // Could not judge the code either way: oversized, or the parser gave up
+  // with a non-SyntaxError (a CSP EvalError, a RangeError from pathological
+  // nesting). Distinct from 'valid' so a checkably-valid field cannot be
+  // patched into an unverifiable blob unnoticed (Codex review on #1014).
+  | { status: 'uncheckable'; reason: string };
+
+function checkJsSyntax(code: string): JsSyntaxCheck {
+  if (code.length > MAX_SYNTAX_CHECKED_LENGTH) {
+    return { status: 'uncheckable', reason: `code exceeds ${MAX_SYNTAX_CHECKED_LENGTH} characters` };
+  }
+  try {
+    new AsyncFunctionCtor(code);
+    return { status: 'valid' };
+  } catch (error) {
+    if (error instanceof SyntaxError) return { status: 'invalid', message: error.message };
+    return { status: 'uncheckable', reason: `the parser gave up (${error instanceof Error ? error.name : 'unknown error'})` };
+  }
+}
+
+// jsCode/functionCode are noDataExpression fields: n8n strips one leading "="
+// before executing them (node-helpers), so an "=" value is NOT an expression
+// there — parse what will actually run (Codex review on #1014).
+function stripExpressionPrefix(value: string): string {
+  return value.startsWith('=') ? value.slice(1) : value;
+}
+
+/**
+ * After a find/replace patch lands on a JavaScript code field, parse the result
+ * so a patch that leaves broken code fails the operation instead of saving it
+ * (#1012 expansion). Throws before the caller writes, keeping the operation
+ * atomic. Only regressions the patch introduced are blocked: when the field
+ * was already unparseable before patching, an incremental repair must be able
+ * to pass through still-broken states.
+ */
+function assertPatchedJsSyntax(operation: string, fieldPath: string, patched: string, original: string): void {
+  const fieldName = fieldPath.split('.').pop() ?? '';
+  if (!JS_CODE_FIELD_NAMES.has(fieldName)) return;
+
+  const patchedCheck = checkJsSyntax(stripExpressionPrefix(patched));
+  if (patchedCheck.status === 'valid') return;
+
+  // The gate: judge only against a baseline we could actually judge. A field
+  // that was already invalid stays patchable (incremental repair), and an
+  // uncheckable baseline gives no standard to hold the patch to.
+  if (checkJsSyntax(stripExpressionPrefix(original)).status !== 'valid') return;
+
+  if (patchedCheck.status === 'invalid') {
+    throw new Error(
+      `${operation}: patches would leave "${fieldPath}" with invalid JavaScript (${patchedCheck.message}). ` +
+      `The workflow was not modified. If several dependent edits pass through an invalid intermediate state, ` +
+      `apply them as one operation — only the final result of the patches array is checked.`
+    );
+  }
+
+  throw new Error(
+    `${operation}: could not verify the JavaScript syntax of "${fieldPath}" after patching (${patchedCheck.reason}). ` +
+    `The workflow was not modified. To set the field anyway, replace its full value with an updateNode operation, ` +
+    `which is not syntax-checked.`
+  );
+}
+
 function operationReferencesAddedNode(
   operation: WorkflowDiffOperation,
   addedNode: AddNodeOperation['node']
@@ -1075,7 +1152,8 @@ export class WorkflowDiffEngine {
       if (value !== null && typeof value === 'object' && !Array.isArray(value)
           && '__patch_find_replace' in value) {
         const patches = value.__patch_find_replace as Array<{ find: string; replace: string }>;
-        let current = this.getNestedProperty(draft, path) as string;
+        const original = this.getNestedProperty(draft, path) as string;
+        let current = original;
         for (const patch of patches) {
           if (!current.includes(patch.find)) {
             this.warnings.push({
@@ -1084,8 +1162,11 @@ export class WorkflowDiffEngine {
             });
             continue;
           }
-          current = current.replace(patch.find, patch.replace);
+          // Function replacer keeps the replacement verbatim — a bare string would
+          // read "$&", "$'" etc. in it as JS replacement patterns (#1012).
+          current = current.replace(patch.find, () => patch.replace);
         }
+        assertPatchedJsSyntax('__patch_find_replace', path, current, original);
         this.setNestedProperty(draft, path, current);
       } else {
         this.setNestedProperty(draft, path, value);
@@ -1153,7 +1234,8 @@ export class WorkflowDiffEngine {
 
     this.modifiedNodeIds.add(node.id);
 
-    let current = this.getNestedProperty(node, operation.fieldPath) as string;
+    const original = this.getNestedProperty(node, operation.fieldPath) as string;
+    let current = original;
 
     for (let i = 0; i < operation.patches.length; i++) {
       const patch = operation.patches[i];
@@ -1196,14 +1278,14 @@ export class WorkflowDiffEngine {
           );
         }
 
-        if (patch.replaceAll) {
-          current = current.split(patch.find).join(patch.replace);
-        } else {
-          current = current.replace(patch.find, patch.replace);
-        }
+        // split/join inserts the replacement verbatim; String.replace would read
+        // "$&", "$'" and friends in it as JS replacement patterns (#1012). Safe
+        // for the single-occurrence case too: the checks above leave exactly one.
+        current = current.split(patch.find).join(patch.replace);
       }
     }
 
+    assertPatchedJsSyntax('patchNodeField', operation.fieldPath, current, original);
     this.setNestedProperty(node, operation.fieldPath, current);
 
     // Sanitize node after updates
