@@ -8,6 +8,8 @@ import {
   HARD_RESULT_BYTES,
   INLINE_RESULT_BYTES,
   boundToolResult,
+  deleteResponseArtifact,
+  describeResponseArtifact,
   persistResponseArtifact,
   pruneResponseArtifacts,
   queryResponseArtifact,
@@ -46,12 +48,34 @@ describe('MCP response bounding', () => {
     expect(schema.properties.filters.items.additionalProperties).toBe(false);
     expect(schema.properties.filters.items.properties.op.enum).toContain('icontains');
     expect(schema.properties.textSearch.additionalProperties).toBe(false);
+    expect(queryResponseArtifactTool.outputSchema).toMatchObject({
+      type: 'object',
+      required: ['artifactId', 'responsePath', 'responseMeta'],
+      additionalProperties: false,
+    });
     for (const legacy of [
       'artifact_id', 'response_path', 'response_filter', 'response_page_size',
       'response_cursor', 'object_mode', 'text_search',
     ]) {
       expect(schema.properties).not.toHaveProperty(legacy);
     }
+  });
+
+  it('exposes only a bounded descriptor and deletes within the owning scope', () => {
+    const artifact = persistResponseArtifact({ secretPayload: 'not-in-the-descriptor' }, 'tenant-a');
+    const descriptor = describeResponseArtifact(artifact.id, 'tenant-a');
+
+    expect(descriptor).toMatchObject({
+      descriptorVersion: 1,
+      contractVersion: 3,
+      id: artifact.id,
+      rawReadable: false,
+      queryTool: 'query_response_artifact',
+    });
+    expect(JSON.stringify(descriptor)).not.toContain('secretPayload');
+    expect(() => describeResponseArtifact(artifact.id, 'tenant-b')).toThrow('different MCP scope');
+    expect(deleteResponseArtifact(artifact.id, 'tenant-a')).toBe(true);
+    expect(deleteResponseArtifact(artifact.id, 'tenant-a')).toBe(false);
   });
 
   it('preserves compact results for backward compatibility', () => {

@@ -39,6 +39,19 @@ class TestableN8NMCPServer extends N8NDocumentationMCPServer {
       { mcpReq: { requestState: () => undefined } }
     );
   }
+
+  public stubExecuteTool(result: unknown): void {
+    (this as any).executeTool = vi.fn().mockResolvedValue(result);
+  }
+
+  public async testReadResource(uri: string): Promise<any> {
+    const handler = (this as any).server._requestHandlers?.get('resources/read');
+    if (!handler) throw new Error('resources/read handler not registered');
+    return handler(
+      { method: 'resources/read', params: { uri } },
+      { mcpReq: { requestState: () => undefined } },
+    );
+  }
 }
 
 describe('response artifact MCP tool', () => {
@@ -75,6 +88,7 @@ describe('response artifact MCP tool', () => {
     expect(server.testFindToolSchema('query_response_artifact')).toMatchObject({
       name: 'query_response_artifact',
       inputSchema: { required: ['artifactId'], additionalProperties: false },
+      outputSchema: { type: 'object', additionalProperties: false },
       annotations: { readOnlyHint: true, idempotentHint: true },
     });
   });
@@ -106,6 +120,52 @@ describe('response artifact MCP tool', () => {
       totalCount: 2,
       remainingCount: 0,
     });
+    expect(response.structuredContent).toEqual(result);
+  });
+
+  it('reads a small descriptor resource without exposing stored values', async () => {
+    const artifact = persistResponseArtifact({ rows: [{ sensitive: 'stored-only' }] }, 'default-instance');
+    const response = await new TestableN8NMCPServer().testReadResource(
+      `artifact://n8n-mcp/${artifact.id}`,
+    );
+    const descriptor = JSON.parse(response.contents[0].text);
+
+    expect(descriptor).toMatchObject({ id: artifact.id, rawReadable: false, responseRoot: '' });
+    expect(Buffer.byteLength(response.contents[0].text)).toBeLessThanOrEqual(8 * 1024);
+    expect(response.contents[0].text).not.toContain('stored-only');
+  });
+
+  it('does not disclose whether an artifact exists outside the active scope', async () => {
+    const artifact = persistResponseArtifact({ value: 'private' }, 'default-instance');
+    const context: InstanceContext = {
+      n8nApiUrl: 'https://example.n8n.cloud',
+      n8nApiKey: 'api-key',
+      instanceId: 'tenant-b',
+    };
+    const server = new TestableN8NMCPServer(context);
+
+    await expect(server.testReadResource(`artifact://n8n-mcp/${artifact.id}`))
+      .rejects.toThrow('Artifact resource is unavailable for this caller');
+    await expect(server.testReadResource('artifact://n8n-mcp/not-valid'))
+      .rejects.toThrow('Artifact resource is unavailable for this caller');
+  });
+
+  it('adds a descriptor link and bounded structured envelope when an origin tool artifacts', async () => {
+    const server = new TestableN8NMCPServer();
+    server.stubExecuteTool({ providerPayload: 'stored-only-'.repeat(4000) });
+
+    const response = await server.testCallTool('tools_documentation', {});
+    const parsed = JSON.parse(response.content[0].text);
+    const link = response.content.find((block: any) => block.type === 'resource_link');
+
+    expect(response.structuredContent).toEqual(parsed);
+    expect(link).toMatchObject({
+      uri: `artifact://n8n-mcp/${parsed.responseMeta.artifact.id}`,
+      mimeType: 'application/json',
+      size: parsed.responseMeta.artifact.byteLength,
+    });
+    expect(Buffer.byteLength(response.content[0].text)).toBeLessThanOrEqual(8 * 1024);
+    expect(response.content[0].text).not.toHaveLength(parsed.responseMeta.artifact.byteLength);
   });
 
   it('requires an artifact id and defaults an omitted response path to the artifact root', async () => {

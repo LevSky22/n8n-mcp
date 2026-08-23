@@ -93,6 +93,12 @@ the full artifact descriptor minted by the originating tool. The full serialized
 128 KiB, artifacts are capped at 50 MiB, expire after 24 hours, and are pruned
 at a 1 GiB quota.
 
+`query_response_artifact` advertises an MCP output schema and returns the same bounded
+JSON as compact text and `structuredContent`. When an originating call creates an
+artifact, its result also includes an `artifact://n8n-mcp/{artifactId}` resource link.
+Reading that link returns at most 8 KiB of metadata and query guidance; it never returns
+the stored provider payload. Ephemeral artifacts are not added to `resources/list`.
+
 Every bounded result reports `responseMeta.complete`, returned/total/remaining
 counts, and an opaque next cursor. A compact preview is never exhaustive when
 `complete` is false, even if an upstream payload says it is on its last page.
