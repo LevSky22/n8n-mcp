@@ -51,6 +51,8 @@ import {
 import { InstanceContext, getInstanceScopeId } from '../types/instance-context';
 import {
   boundToolResult,
+  ArtifactHandleError,
+  describeResponseArtifact,
   queryResponseArtifact,
   queryResponseArtifactTool,
   serializeToolText,
@@ -391,7 +393,7 @@ export class N8NDocumentationMCPServer {
    * Used by the arg preprocessing pipeline so additional tools receive the
    * same client-bug coercion and schema validation as built-ins.
    */
-  private findToolSchema(name: string): { name: string; inputSchema?: any } | undefined {
+  private findToolSchema(name: string): { name: string; inputSchema?: any; outputSchema?: any } | undefined {
     const documentationTool = n8nDocumentationToolsFinal.find(t => t.name === name);
     if (documentationTool) return documentationTool;
 
@@ -1125,17 +1127,27 @@ export class N8NDocumentationMCPServer {
         // Ensure the result is properly formatted for MCP
         let responseText: string;
         let structuredContent: any = null;
+        const toolDefinition = this.findToolSchema(name);
+        const artifact = result && typeof result === 'object'
+          ? (result as any).responseMeta?.artifact
+          : undefined;
         
         let serializationFailed = false;
         try {
-          // For validation tools, check if we should use structured content
-          if (name.startsWith('validate_') && typeof result === 'object' && result !== null) {
-            // Clean up the result to ensure it matches the outputSchema
-            const cleanResult = this.sanitizeValidationResult(result, name);
+          if ((toolDefinition?.outputSchema || name.startsWith('validate_'))
+            && typeof result === 'object' && result !== null) {
+            // Validation tools require their historical cleanup; every other schema-backed
+            // tool already constructs its canonical wire object directly.
+            const cleanResult = name.startsWith('validate_')
+              ? this.sanitizeValidationResult(result, name)
+              : result;
             structuredContent = cleanResult;
             responseText = serializeToolText(cleanResult);
           } else {
             responseText = typeof result === 'string' ? result : serializeToolText(result);
+            // An artifact-backed envelope is already bounded. Expose it structurally even
+            // though heterogeneous origin tools cannot advertise one conditional schema.
+            if (artifact) structuredContent = result;
           }
         } catch (jsonError) {
           logger.warn(`Failed to stringify tool result for ${name}:`, jsonError);
@@ -1156,8 +1168,20 @@ export class N8NDocumentationMCPServer {
         };
         
         // For tools with outputSchema, structuredContent is REQUIRED by MCP spec
-        if (name.startsWith('validate_') && structuredContent !== null) {
+        if (structuredContent !== null) {
           mcpResponse.structuredContent = structuredContent;
+        }
+
+        if (artifact && typeof artifact.id === 'string') {
+          mcpResponse.content.push({
+            type: 'resource_link',
+            uri: `artifact://n8n-mcp/${artifact.id}`,
+            name: `response-artifact-${artifact.id}`,
+            title: 'Bounded response artifact descriptor',
+            description: 'Descriptor only; use query_response_artifact to inspect stored values.',
+            mimeType: 'application/json',
+            size: artifact.byteLength,
+          });
         }
 
         if (serializationFailed) {
@@ -1269,9 +1293,30 @@ export class N8NDocumentationMCPServer {
       resourceTemplates: SkillResourceRegistry.getTemplates(),
     }));
 
-    // Handle ReadResource for UI apps and skill markdown
+    // Handle ReadResource for UI apps, skill markdown, and descriptor-only artifacts.
     this.server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
       const uri = request.params.uri;
+
+      if (uri.startsWith('artifact://n8n-mcp/')) {
+        const artifactMatch = uri.match(/^artifact:\/\/n8n-mcp\/([A-Za-z0-9_-]{20,100})$/);
+        if (!artifactMatch) throw new Error('Artifact resource is unavailable for this caller');
+        try {
+          const owner = this.instanceContext ? getInstanceScopeId(this.instanceContext) : 'default-instance';
+          const descriptor = describeResponseArtifact(artifactMatch[1], owner);
+          const text = serializeToolText(descriptor);
+          if (Buffer.byteLength(text) > 8 * 1024) {
+            throw new Error('Artifact descriptor exceeded its 8 KiB safety limit');
+          }
+          return {
+            contents: [{ uri, mimeType: 'application/json', text }],
+          };
+        } catch (error) {
+          if (error instanceof ArtifactHandleError) {
+            throw new Error('Artifact resource is unavailable for this caller');
+          }
+          throw error;
+        }
+      }
 
       const uiMatch = uri.match(/^ui:\/\/n8n-mcp\/(.+)$/);
       if (uiMatch) {

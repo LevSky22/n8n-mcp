@@ -80,6 +80,13 @@ export interface ArtifactReference {
   sourceTruncated: boolean;
 }
 
+export interface ArtifactDescriptor extends ArtifactReference {
+  descriptorVersion: 1;
+  contractVersion: 3;
+  rawReadable: false;
+  guidance: string;
+}
+
 /** Distinguishes recoverable handle problems so a model can re-mint instead of guessing. */
 export class ArtifactHandleError extends Error {
   readonly reason: 'unknown' | 'expired' | 'wrong_scope' | 'invalid_cursor' | 'invalid_id';
@@ -179,6 +186,44 @@ export const queryResponseArtifactTool = {
       cursor: { type: 'string', description: 'Opaque responseMeta.nextCursor from the previous query page. Keep every other query-view argument unchanged.' },
     },
     required: ['artifactId'],
+    additionalProperties: false,
+  },
+  outputSchema: {
+    type: 'object',
+    properties: {
+      artifactId: { type: 'string' },
+      responsePath: { type: 'string' },
+      response: {},
+      shape: { type: 'object' },
+      responseMeta: {
+        type: 'object',
+        properties: {
+          contractVersion: { type: 'integer', const: 3 },
+          truncated: { type: 'boolean' },
+          complete: { type: 'boolean' },
+          truncationReason: { anyOf: [{ type: 'string' }, { type: 'null' }] },
+          returnedCount: { anyOf: [{ type: 'integer' }, { type: 'null' }] },
+          totalCount: { anyOf: [{ type: 'integer' }, { type: 'null' }] },
+          remainingCount: { anyOf: [{ type: 'integer' }, { type: 'null' }] },
+          nextCursor: { anyOf: [{ type: 'string' }, { type: 'null' }] },
+          serializedBytes: { type: 'integer', minimum: 0 },
+          warning: { anyOf: [{ type: 'string' }, { type: 'null' }] },
+          pageUnit: { type: 'string', enum: ['items', 'entries'] },
+          sourceTruncated: { type: 'boolean' },
+          filtersApplied: { type: 'array' },
+          fieldsResolved: { type: 'object' },
+          inferredResponsePath: { type: 'string' },
+        },
+        required: [
+          'contractVersion', 'truncated', 'complete', 'truncationReason',
+          'returnedCount', 'totalCount', 'remainingCount', 'nextCursor',
+          'serializedBytes', 'warning',
+        ],
+        additionalProperties: false,
+      },
+    },
+    required: ['artifactId', 'responsePath', 'responseMeta'],
+    oneOf: [{ required: ['response'] }, { required: ['shape'] }],
     additionalProperties: false,
   },
   annotations: { title: 'Query Response Artifact', readOnlyHint: true, idempotentHint: true, openWorldHint: false },
@@ -849,6 +894,32 @@ function loadMetadata(artifactId: string, owner: string): { dataPath: string; me
     );
   }
   return { dataPath: target.data, metadata };
+}
+
+export function describeResponseArtifact(artifactId: string, owner: string): ArtifactDescriptor {
+  const { metadata } = loadMetadata(artifactId, owner);
+  return {
+    descriptorVersion: 1,
+    contractVersion: 3,
+    ...artifactReference(artifactId, metadata),
+    rawReadable: false,
+    guidance: 'This resource is a bounded descriptor only. Use query_response_artifact to inspect stored values.',
+  };
+}
+
+export function deleteResponseArtifact(artifactId: string, owner: string): boolean {
+  const target = paths(artifactId);
+  if (!existsSync(target.data) && !existsSync(target.meta)) return false;
+  const { dataPath } = loadMetadata(artifactId, owner);
+  let deleted = false;
+  for (const file of [dataPath, target.meta]) {
+    if (existsSync(file)) {
+      unlinkSync(file);
+      deleted = true;
+    }
+  }
+  if (parsedArtifact?.artifactId === artifactId) parsedArtifact = null;
+  return deleted;
 }
 
 /**
