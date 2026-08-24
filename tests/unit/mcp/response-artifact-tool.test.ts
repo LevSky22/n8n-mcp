@@ -85,12 +85,16 @@ describe('response artifact MCP tool', () => {
 
   it('resolves the structured artifact query schema as a built-in tool', () => {
     const server = new TestableN8NMCPServer();
-    expect(server.testFindToolSchema('query_response_artifact')).toMatchObject({
+    const schema = server.testFindToolSchema('query_response_artifact');
+    expect(schema).toMatchObject({
       name: 'query_response_artifact',
       inputSchema: { required: ['artifactId'], additionalProperties: false },
       outputSchema: { type: 'object', additionalProperties: false },
       annotations: { readOnlyHint: true, idempotentHint: true },
     });
+    expect(
+      Object.keys(schema?.inputSchema.properties ?? {}).filter(name => name.includes('_')),
+    ).toEqual([]);
   });
 
   it('queries artifacts in the configured tenant scope', async () => {
