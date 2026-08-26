@@ -23,6 +23,7 @@ export const queryResponseArtifactDoc: ToolDocumentation = {
       'Call with describe=true first. The inline preview you just read is a reshaped summary, so a pointer copied out of it may not exist in the artifact.',
       'responseMeta.artifact.primaryPaths lists pointers that do resolve — prefer those over guessing.',
       'Omit responsePath to use the artifact\'s advertised responseRoot (the n8n artifact root is ""). Pass responsePath: "" explicitly for the whole document.',
+      'Exact pointers win. If one is missing and responseRoot is non-empty, it is tried once beneath that root and the canonical path is returned in responsePath and responseMeta.inferredResponsePath.',
       'RFC 6901 treats "/" as a property whose name is empty; it is not the document root.',
       'On a selected object, fields or filters infer exactly one array child and report its full pointer as responseMeta.inferredResponsePath; ambiguous shapes still need a more specific responsePath.',
       'pageSize is limited to 1-100. Request another semantic page only when the current page did not answer the question.',
@@ -51,7 +52,7 @@ Arrays page by element and objects page by entry.`,
         type: 'string',
         required: false,
         default: '',
-        description: 'RFC 6901 pointer selecting the value to query. Omit it to use responseMeta.artifact.responseRoot; for n8n that default is the whole document (empty string). A literal "/" selects an empty-key property, not the root.'
+        description: 'RFC 6901 pointer selecting the value to query. Omit it to use responseMeta.artifact.responseRoot; for n8n that default is the whole document (empty string). Exact pointers win; a missing pointer is tried once beneath a non-empty responseRoot and reports its canonical path. A literal "/" selects an empty-key property, not the root.'
       },
       describe: {
         type: 'boolean',
@@ -110,7 +111,7 @@ Arrays page by element and objects page by entry.`,
     ],
     performance: 'Fast - local artifact read; cost scales with the selected page, not the artifact size',
     errorHandling:
-      'INVALID_RESPONSE_PATH means an explicit responsePath is absent. Use the reported parent and available children, omit responsePath to restore the advertised responseRoot, or describe a valid parent. An unknown artifactId means the handle expired (24 hour ceiling) or the MCP server restarted; re-run the originating tool to mint a new one.',
+      'INVALID_RESPONSE_PATH means the pointer was absent both exactly and beneath any non-empty responseRoot. Use the attempted canonical path, reported parent, and available children; omit responsePath to restore the advertised responseRoot, or describe a valid parent. An unknown artifactId means the handle expired (24 hour ceiling) or the MCP server restarted; re-run the originating tool to mint a new one.',
     bestPractices: [
       'Omit responsePath for the first query; use describe=true when the default root\'s shape is unfamiliar',
       'Prefer primaryPaths over pointers copied from an inline preview',

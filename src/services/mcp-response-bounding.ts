@@ -125,7 +125,8 @@ export const queryResponseArtifactTool = {
     'Start with describe=true to see the real keys and array lengths at a path — the inline tool ' +
     'preview is a reshaped summary, so pointers copied from it may not exist in the artifact ' +
     '(responseMeta.artifact.primaryPaths lists pointers that do). responsePath uses RFC 6901 and ' +
-    'defaults to the artifact responseRoot when omitted. ' +
+    'defaults to the artifact responseRoot when omitted. Exact pointers win; if one is missing and ' +
+    'responseRoot is non-empty, it is tried once beneath that root and the canonical pointer is reported. ' +
     'fields accepts root names such as id or pointers such as /status/name. Arrays page by element and ' +
     'objects page by entry. For keyed maps such as n8n connections, set objectMode="entries" and filter ' +
     'on /key rather than guessing nested array paths. Use textSearch for a bounded literal search across ' +
@@ -140,7 +141,7 @@ export const queryResponseArtifactTool = {
     type: 'object',
     properties: {
       artifactId: { type: 'string', description: 'Opaque artifact id returned in responseMeta.artifact.id' },
-      responsePath: { type: 'string', description: 'RFC 6901 pointer selecting the value to query. Omit it to use the artifact responseRoot; use an empty string for the full stored document. A literal / selects an empty-key property, not the root.' },
+      responsePath: { type: 'string', description: 'RFC 6901 pointer selecting the value to query. Omit it to use the artifact responseRoot. Exact pointers win; a missing pointer is tried once beneath a non-empty responseRoot and reports its canonical path. Use an empty string for the full stored document. A literal / selects an empty-key property, not the root.' },
       describe: {
         type: 'boolean',
         description: 'Return the shape at responsePath (types, key names, array lengths) instead of values. Use this first when you do not know the structure.',
@@ -324,15 +325,60 @@ function isMissingPointerError(error: unknown): boolean {
   return error instanceof JsonPointerResolutionError;
 }
 
-function invalidResponsePath(error: JsonPointerResolutionError, responseRoot: string): Error {
-  const at = error.resolvedPath === '' ? 'the document root' : `"${error.resolvedPath}"`;
+function responseRootCandidate(requestedPath: string, responseRoot: string): string | undefined {
+  if (
+    responseRoot === '' ||
+    requestedPath === '' ||
+    requestedPath === responseRoot ||
+    requestedPath.startsWith(`${responseRoot}/`)
+  ) return undefined;
+  return `${responseRoot}${requestedPath}`;
+}
+
+function invalidResponsePath(
+  error: JsonPointerResolutionError,
+  responseRoot: string,
+  attemptedPath?: string,
+  attemptedError?: JsonPointerResolutionError,
+): Error {
+  const diagnostic = attemptedError ?? error;
+  const at = diagnostic.resolvedPath === '' ? 'the document root' : `"${diagnostic.resolvedPath}"`;
+  const attempted = attemptedPath
+    ? ` as an absolute pointer or relative to responseRoot=${JSON.stringify(responseRoot)} (tried "${attemptedPath}")`
+    : '';
   return new Error(
-    `INVALID_RESPONSE_PATH: "${error.requestedPath}" does not exist. ` +
-    `${at} resolves to ${jsonType(error.selectedValue)} and has no "${error.failedToken}" child. ` +
-    `Available children: ${describeAvailableKeys(error.selectedValue)}. ` +
+    `INVALID_RESPONSE_PATH: "${error.requestedPath}" does not exist${attempted}. ` +
+    `${at} resolves to ${jsonType(diagnostic.selectedValue)} and has no "${diagnostic.failedToken}" child. ` +
+    `Available children: ${describeAvailableKeys(diagnostic.selectedValue)}. ` +
     `Retry without responsePath to use responseRoot=${JSON.stringify(responseRoot)}, ` +
     'or call with describe=true at a valid parent pointer.',
   );
+}
+
+function selectResponsePath(
+  document: unknown,
+  requestedPath: string,
+  responseRoot: string,
+): { selected: unknown; responsePath: string; inferredResponsePath?: string } {
+  try {
+    return { selected: pointer(document, requestedPath), responsePath: requestedPath };
+  } catch (error) {
+    if (!(error instanceof JsonPointerResolutionError)) throw error;
+    const candidate = responseRootCandidate(requestedPath, responseRoot);
+    if (!candidate) throw invalidResponsePath(error, responseRoot);
+    try {
+      return {
+        selected: pointer(document, candidate),
+        responsePath: candidate,
+        inferredResponsePath: candidate,
+      };
+    } catch (attemptedError) {
+      if (attemptedError instanceof JsonPointerResolutionError) {
+        throw invalidResponsePath(error, responseRoot, candidate, attemptedError);
+      }
+      throw attemptedError;
+    }
+  }
 }
 
 function fieldPointer(field: string): string {
@@ -1195,17 +1241,10 @@ export function queryResponseArtifact(
   const document = loadDocument(artifactId, dataPath);
   responsePath = responsePath ?? metadata.responseRoot;
   const sourceTruncated = metadata.sourceTruncated ?? false;
-
-  let selected: unknown;
-  try {
-    selected = pointer(document, responsePath);
-  } catch (error) {
-    if (error instanceof JsonPointerResolutionError) {
-      throw invalidResponsePath(error, metadata.responseRoot);
-    }
-    throw error;
-  }
-  let inferredResponsePath: string | undefined;
+  const resolution = selectResponsePath(document, responsePath, metadata.responseRoot);
+  let selected = resolution.selected;
+  responsePath = resolution.responsePath;
+  let inferredResponsePath = resolution.inferredResponsePath;
 
   if (textSearch !== undefined) {
     if (describe || fields?.length || filters?.length || objectMode !== undefined || cursor) {
@@ -1228,6 +1267,7 @@ export function queryResponseArtifact(
         ? `More than ${TEXT_SEARCH_MAX_MATCHES} matches exist; narrow responsePath or use a more specific literal.`
         : null,
     };
+    if (inferredResponsePath) meta.inferredResponsePath = inferredResponsePath;
     const result = {
       artifactId,
       responsePath,
@@ -1282,6 +1322,7 @@ export function queryResponseArtifact(
         serializedBytes: 0,
         pageUnit: 'entries' as const,
         sourceTruncated,
+        ...(inferredResponsePath ? { inferredResponsePath } : {}),
         ...completionMetadata(nextCursor !== null, described.returned, described.total, offset),
       } satisfies ResponseMeta,
     };
