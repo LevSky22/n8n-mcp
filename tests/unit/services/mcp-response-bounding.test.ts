@@ -573,6 +573,12 @@ describe('MCP response bounding', () => {
     ) as any;
     expect(defaulted.responsePath).toBe('');
     expect(defaulted.response).toEqual({ '': 'empty-key', value: 'root' });
+    expect(defaulted.responseMeta).not.toHaveProperty('inferredResponsePath');
+    const exactRoot = queryResponseArtifact(
+      rootArtifact.id, '/value', undefined, undefined, 20, undefined, 'tenant-a',
+    ) as any;
+    expect(exactRoot.responsePath).toBe('/value');
+    expect(exactRoot.responseMeta).not.toHaveProperty('inferredResponsePath');
     const emptyKey = queryResponseArtifact(
       rootArtifact.id, '/', undefined, undefined, 20, undefined, 'tenant-a',
     ) as any;

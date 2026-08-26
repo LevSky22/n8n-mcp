@@ -55,6 +55,7 @@ import {
   describeResponseArtifact,
   queryResponseArtifact,
   queryResponseArtifactTool,
+  ResponseControlError,
   serializeToolText,
 } from '../services/mcp-response-bounding';
 import type { AdditionalTool, AdditionalToolContext } from '../types/additional-tools';
@@ -85,6 +86,47 @@ const STDIO_MAX_BUFFER_SIZE = Math.max(
   1024 * 1024,
   parseInt(process.env.N8N_MCP_STDIO_MAX_BUFFER_SIZE || '', 10) || 64 * 1024 * 1024
 );
+
+function artifactQueryErrorResult(error: ResponseControlError | ArtifactHandleError, args: any): any {
+  const code = error instanceof ResponseControlError
+    ? error.code
+    : error.reason === 'invalid_cursor' ? 'INVALID_RESPONSE_CURSOR' : 'INVALID_ARTIFACT_HANDLE';
+  const rawMessage = error.message || 'Invalid response artifact query';
+  const message = rawMessage.length <= 4096
+    ? rawMessage
+    : `${rawMessage.slice(0, 4060)}… [error message truncated]`;
+  const artifactId = typeof args?.artifactId === 'string'
+    && /^[A-Za-z0-9_-]{20,100}$/.test(args.artifactId)
+    ? args.artifactId
+    : 'unknown';
+  const responsePath = typeof args?.responsePath === 'string' && args.responsePath.length <= 1000
+    ? args.responsePath
+    : '';
+  const responseMeta = {
+    contractVersion: 3,
+    truncated: false,
+    complete: false,
+    truncationReason: null,
+    returnedCount: 0,
+    totalCount: null,
+    remainingCount: null,
+    nextCursor: null,
+    serializedBytes: 0,
+    warning: message,
+  };
+  const structuredContent = {
+    artifactId,
+    responsePath,
+    response: { error: { code, message } },
+    responseMeta,
+  };
+  responseMeta.serializedBytes = Buffer.byteLength(serializeToolText(structuredContent), 'utf8');
+  return {
+    isError: true,
+    content: [{ type: 'text' as const, text: message }],
+    structuredContent,
+  };
+}
 
 /**
  * Escape a string for safe use as a literal inside `new RegExp(...)`.
@@ -1212,6 +1254,11 @@ export class N8NDocumentationMCPServer {
         this.previousTool = name;
         this.previousToolTimestamp = Date.now();
 
+        if (name === queryResponseArtifactTool.name
+          && (error instanceof ResponseControlError || error instanceof ArtifactHandleError)) {
+          return artifactQueryErrorResult(error, processedArgs);
+        }
+
         if (isAdditionalTool) {
           // Host controls error response shape. Skip the n8n-specific guidance
           // and arg-type diagnostic the built-in branch appends — those leak
@@ -1773,10 +1820,13 @@ export class N8NDocumentationMCPServer {
 
     if (name === queryResponseArtifactTool.name) {
       if (!args.artifactId || typeof args.artifactId !== 'string') {
-        throw new Error('artifactId is required');
+        throw new ResponseControlError('INVALID_RESPONSE_CONTROLS', 'artifactId is required');
       }
       if (args.responsePath !== undefined && typeof args.responsePath !== 'string') {
-        throw new Error('responsePath must be an RFC 6901 string when provided');
+        throw new ResponseControlError(
+          'INVALID_RESPONSE_CONTROLS',
+          'responsePath must be an RFC 6901 string when provided',
+        );
       }
       const owner = this.instanceContext ? getInstanceScopeId(this.instanceContext) : 'default-instance';
       return queryResponseArtifact(
