@@ -73,8 +73,11 @@ Compact JSON tool results stay inline up to a conservative 32 KiB budget. Larger
 execution, documentation, and host-injected tool results return a compact
 preview capped at 8 KiB plus `responseMeta.artifact`. Prefer `query_response_artifact` to
 select, filter, project, search, and paginate structured JSON without loading the full
-artifact into model context. Artifact query paths use RFC 6901, while projected fields accept
-either root names such as `id` or pointers such as `/status/name`. When fields
+artifact into model context. Artifact query paths use RFC 6901. Exact document
+pointers win; when one is missing and the advertised `responseRoot` is non-empty,
+the same pointer is tried once beneath that root and the canonical path is reported
+as `responseMeta.inferredResponsePath`. Projected fields accept either root names
+such as `id` or pointers such as `/status/name`. When fields
 or filters target an object containing exactly one array child,
 the query selects that collection and reports its pointer as
 `responseMeta.inferredResponsePath`; ambiguous objects still require a

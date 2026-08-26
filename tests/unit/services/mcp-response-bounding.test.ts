@@ -579,6 +579,54 @@ describe('MCP response bounding', () => {
     expect(emptyKey.response).toBe('empty-key');
   });
 
+  it('normalizes missing pointers beneath the advertised response root', () => {
+    const artifact = persistResponseArtifact({
+      response: { teams: [{ id: 1 }, { id: 2 }, { id: 3 }] },
+    }, 'tenant-a');
+    const metaPath = path.join(root, `response-${artifact.id}.meta.json`);
+    const metadata = JSON.parse(readFileSync(metaPath, 'utf8'));
+    metadata.responseRoot = '/response';
+    writeFileSync(metaPath, JSON.stringify(metadata));
+
+    const first = queryResponseArtifact(
+      artifact.id, '/teams', ['id'], undefined, 1, undefined, 'tenant-a',
+    ) as any;
+    const second = queryResponseArtifact(
+      artifact.id, '/response/teams', ['id'], undefined, 1,
+      first.responseMeta.nextCursor, 'tenant-a',
+    ) as any;
+
+    expect(first.responsePath).toBe('/response/teams');
+    expect(first.response).toEqual([{ id: 1 }]);
+    expect(first.responseMeta.inferredResponsePath).toBe('/response/teams');
+    expect(second.response).toEqual([{ id: 2 }]);
+    expect(second.responseMeta).not.toHaveProperty('inferredResponsePath');
+  });
+
+  it('keeps exact pointers authoritative and reports failed root-relative attempts', () => {
+    const artifact = persistResponseArtifact({
+      teams: [{ id: 'document' }],
+      response: { teams: [{ id: 'private-team-value' }], available: true },
+    }, 'tenant-a');
+    const metaPath = path.join(root, `response-${artifact.id}.meta.json`);
+    const metadata = JSON.parse(readFileSync(metaPath, 'utf8'));
+    metadata.responseRoot = '/response';
+    writeFileSync(metaPath, JSON.stringify(metadata));
+
+    const exact = queryResponseArtifact(
+      artifact.id, '/teams', ['id'], undefined, 20, undefined, 'tenant-a',
+    ) as any;
+    const missing = () => queryResponseArtifact(
+      artifact.id, '/missing', undefined, undefined, 20, undefined, 'tenant-a',
+    );
+
+    expect(exact.response).toEqual([{ id: 'document' }]);
+    expect(exact.responseMeta).not.toHaveProperty('inferredResponsePath');
+    expect(missing).toThrow('tried "/response/missing"');
+    expect(missing).toThrow('Available children: /teams, /available');
+    expect(missing).not.toThrow('private-team-value');
+  });
+
   it('supports case-insensitive contains filters', () => {
     const artifact = persistResponseArtifact({ rows: [{ name: 'AddNode' }, { name: 'removeNode' }] }, 'tenant-a');
     const result = queryResponseArtifact(
