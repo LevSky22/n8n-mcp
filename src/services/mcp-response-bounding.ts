@@ -74,7 +74,7 @@ export interface ArtifactReference {
   sha256: string;
   expiresAt: string;
   queryTool: 'query_response_artifact';
-  responseRoot: '';
+  responseRoot: string;
   /** Pointers to the artifact's main collections; preview pointers may not exist here. */
   primaryPaths: string[];
   sourceTruncated: boolean;
@@ -96,6 +96,25 @@ export class ArtifactHandleError extends Error {
     this.name = 'ArtifactHandleError';
     this.reason = reason;
   }
+}
+
+export type ResponseControlErrorCode =
+  | 'INVALID_RESPONSE_PATH'
+  | 'INVALID_RESPONSE_CONTROLS';
+
+/** A caller-correctable semantic artifact query error, safe to return structurally. */
+export class ResponseControlError extends Error {
+  readonly code: ResponseControlErrorCode;
+
+  constructor(code: ResponseControlErrorCode, message: string) {
+    super(message);
+    this.name = 'ResponseControlError';
+    this.code = code;
+  }
+}
+
+function invalidResponseControls(message: string): ResponseControlError {
+  return new ResponseControlError('INVALID_RESPONSE_CONTROLS', message);
 }
 
 /** Tools that already bound their own replies and must not be bounded again. */
@@ -302,7 +321,7 @@ class JsonPointerResolutionError extends Error {
 function pointer(value: unknown, jsonPointer: string): unknown {
   if (jsonPointer === '') return value;
   if (!jsonPointer.startsWith('/')) {
-    throw new Error('responsePath and filter paths must use RFC 6901 JSON pointers');
+    throw invalidResponseControls('responsePath and filter paths must use RFC 6901 JSON pointers');
   }
   let current = value;
   const resolvedTokens: string[] = [];
@@ -340,13 +359,14 @@ function invalidResponsePath(
   responseRoot: string,
   attemptedPath?: string,
   attemptedError?: JsonPointerResolutionError,
-): Error {
+): ResponseControlError {
   const diagnostic = attemptedError ?? error;
   const at = diagnostic.resolvedPath === '' ? 'the document root' : `"${diagnostic.resolvedPath}"`;
   const attempted = attemptedPath
     ? ` as an absolute pointer or relative to responseRoot=${JSON.stringify(responseRoot)} (tried "${attemptedPath}")`
     : '';
-  return new Error(
+  return new ResponseControlError(
+    'INVALID_RESPONSE_PATH',
     `INVALID_RESPONSE_PATH: "${error.requestedPath}" does not exist${attempted}. ` +
     `${at} resolves to ${jsonType(diagnostic.selectedValue)} and has no "${diagnostic.failedToken}" child. ` +
     `Available children: ${describeAvailableKeys(diagnostic.selectedValue)}. ` +
@@ -383,7 +403,7 @@ function selectResponsePath(
 
 function fieldPointer(field: string): string {
   if (typeof field !== 'string' || field.length === 0) {
-    throw new Error('fields entries must be non-empty strings');
+    throw invalidResponseControls('fields entries must be non-empty strings');
   }
   if (field.startsWith('/')) return field;
   return `/${escapeToken(field)}`;
@@ -444,7 +464,7 @@ function projectSelection(
   if (Array.isArray(selected)) {
     const projected = selected.map(item => projectItem(item, fields, resolved));
     if (selected.length > 0 && !Object.values(resolved).some(count => count > 0)) {
-      throw new Error(
+      throw invalidResponseControls(
         `fields matched no properties on any of the ${selected.length} selected items. ` +
         `Each item exposes: ${describeAvailableKeys(selected[0])}. ` +
         `Use root names such as 'id' or RFC 6901 pointers such as '/status/name'.`,
@@ -455,7 +475,7 @@ function projectSelection(
 
   const projected = projectItem(selected, fields, resolved);
   if (!Object.values(resolved).some(count => count > 0)) {
-    throw new Error(
+    throw invalidResponseControls(
       `fields matched no properties. The selected value exposes: ${describeAvailableKeys(selected)}. ` +
       `Use root names such as 'id' or RFC 6901 pointers such as '/status/name'.`,
     );
@@ -496,7 +516,7 @@ function evaluateFilter(item: unknown, filter: ResponseFilter): FilterOutcome {
 
   if (op === 'exists') {
     const shouldExist = filter.value === undefined ? true : filter.value;
-    if (typeof shouldExist !== 'boolean') throw new Error('exists filter value must be boolean when provided');
+    if (typeof shouldExist !== 'boolean') throw invalidResponseControls('exists filter value must be boolean when provided');
     return { resolved: true, comparable: true, matched: (actual !== MISSING) === shouldExist };
   }
 
@@ -505,7 +525,7 @@ function evaluateFilter(item: unknown, filter: ResponseFilter): FilterOutcome {
   if (op === 'eq') return { resolved: true, comparable: true, matched: isDeepStrictEqual(actual, filter.value) };
   if (op === 'ne') return { resolved: true, comparable: true, matched: !isDeepStrictEqual(actual, filter.value) };
   if (op === 'in') {
-    if (!Array.isArray(filter.value)) throw new Error('in filter value must be an array');
+    if (!Array.isArray(filter.value)) throw invalidResponseControls('in filter value must be an array');
     return { resolved: true, comparable: true, matched: filter.value.some(value => isDeepStrictEqual(actual, value)) };
   }
   if (op === 'contains') return { resolved: true, comparable: true, matched: contains(actual, filter.value) };
@@ -555,7 +575,7 @@ function applyFilters(items: unknown[], filters: ResponseFilter[]): { kept: unkn
   if (items.length > 0) {
     const unresolved = stats.filter(stat => stat.resolvedOn === 0);
     if (unresolved.length > 0) {
-      throw new Error(
+      throw invalidResponseControls(
         `filter path did not resolve on any of the ${items.length} selected items: ` +
         `${unresolved.map(stat => stat.path).join(', ')}. Each item exposes: ` +
         `${describeAvailableKeys(items[0])}. Filter paths are RFC 6901 pointers relative to each item, ` +
@@ -566,7 +586,7 @@ function applyFilters(items: unknown[], filters: ResponseFilter[]): { kept: unkn
       (stat, index) => COMPARISON_OPERATIONS.has(stat.op) && comparableOn[index] === 0,
     );
     if (incomparable.length > 0) {
-      throw new Error(
+      throw invalidResponseControls(
         `filter comparison never had comparable operands: ` +
         `${incomparable.map(stat => `${stat.path} ${stat.op}`).join(', ')}. ` +
         `The stored values and the supplied value must both be numbers, or both strings. ` +
@@ -887,7 +907,7 @@ interface ArtifactMetadata {
   byteLength: number;
   sha256: string;
   expiresAt: string;
-  responseRoot: '';
+  responseRoot: string;
   primaryPaths?: string[];
   sourceTruncated?: boolean;
 }
@@ -1106,10 +1126,10 @@ function searchStringValues(
   search: TextSearch,
 ): { matches: TextSearchMatch[]; truncated: boolean } {
   if (!search || typeof search !== 'object' || typeof search.query !== 'string') {
-    throw new Error('textSearch.query must be a non-empty string');
+    throw invalidResponseControls('textSearch.query must be a non-empty string');
   }
   if (search.query.length < 1 || search.query.length > 500) {
-    throw new Error('textSearch.query must contain between 1 and 500 characters');
+    throw invalidResponseControls('textSearch.query must contain between 1 and 500 characters');
   }
 
   const needle = search.caseSensitive ? search.query : search.query.toLowerCase();
@@ -1195,9 +1215,9 @@ function objectModeRequired(
   pageSize: number,
   fields?: string[],
   filters?: ResponseFilter[],
-): Error {
+): ResponseControlError {
   const suggestion = objectModeSuggestion(artifactId, responsePath, pageSize, fields, filters);
-  return new Error(
+  return invalidResponseControls(
     `OBJECT_MODE_REQUIRED: ${responsePath || '/'} selects a keyed JSON object, not an array. ` +
     `Query its entries and filter /key or fields beneath /value. suggestedRequest=${JSON.stringify(suggestion)}`,
   );
@@ -1224,16 +1244,16 @@ export function queryResponseArtifact(
   textSearch?: TextSearch,
 ): unknown {
   if (!Number.isInteger(pageSize) || pageSize < 1 || pageSize > MAX_PAGE_SIZE) {
-    throw new Error(`pageSize must be an integer between 1 and ${MAX_PAGE_SIZE}`);
+    throw invalidResponseControls(`pageSize must be an integer between 1 and ${MAX_PAGE_SIZE}`);
   }
-  if (fields && fields.length > 50) throw new Error('fields accepts at most 50 entries');
-  if (filters && filters.length > 10) throw new Error('filters accepts at most 10 predicates');
+  if (fields && fields.length > 50) throw invalidResponseControls('fields accepts at most 50 entries');
+  if (filters && filters.length > 10) throw invalidResponseControls('filters accepts at most 10 predicates');
   for (const filter of filters ?? []) {
     if (!filter || typeof filter !== 'object' || typeof filter.path !== 'string') {
-      throw new Error('each filter must be an object with an RFC 6901 path');
+      throw invalidResponseControls('each filter must be an object with an RFC 6901 path');
     }
     if (filter.op !== undefined && !FILTER_OPERATIONS.includes(filter.op)) {
-      throw new Error(`Unsupported filter operation: ${filter.op}`);
+      throw invalidResponseControls(`Unsupported filter operation: ${filter.op}`);
     }
   }
 
@@ -1248,7 +1268,7 @@ export function queryResponseArtifact(
 
   if (textSearch !== undefined) {
     if (describe || fields?.length || filters?.length || objectMode !== undefined || cursor) {
-      throw new Error('textSearch cannot be combined with describe, fields, filters, objectMode, or cursor');
+      throw invalidResponseControls('textSearch cannot be combined with describe, fields, filters, objectMode, or cursor');
     }
     const searched = searchStringValues(selected, responsePath, textSearch);
     const meta: ResponseMeta = {
@@ -1280,10 +1300,10 @@ export function queryResponseArtifact(
 
   if (describe) {
     if (fields?.length || filters?.length) {
-      throw new Error('describe cannot be combined with fields or filters');
+      throw invalidResponseControls('describe cannot be combined with fields or filters');
     }
     if (objectMode !== undefined) {
-      throw new Error('describe cannot be combined with objectMode');
+      throw invalidResponseControls('describe cannot be combined with objectMode');
     }
     const viewHash = createHash('sha256').update(encode({
       contractVersion: 3,
@@ -1331,9 +1351,9 @@ export function queryResponseArtifact(
   }
 
   if (objectMode !== undefined) {
-    if (objectMode !== 'entries') throw new Error(`Unsupported objectMode: ${objectMode}`);
+    if (objectMode !== 'entries') throw invalidResponseControls(`Unsupported objectMode: ${objectMode}`);
     if (!selected || typeof selected !== 'object' || Array.isArray(selected)) {
-      throw new Error(`objectMode=entries requires responsePath to select a JSON object, but it selects ${jsonType(selected)}`);
+      throw invalidResponseControls(`objectMode=entries requires responsePath to select a JSON object, but it selects ${jsonType(selected)}`);
     }
     selected = Object.entries(selected as Record<string, unknown>).map(([key, value]) => ({ key, value }));
   }
@@ -1349,7 +1369,7 @@ export function queryResponseArtifact(
         if (isKeyedObject(selected)) {
           throw objectModeRequired(artifactId, responsePath, pageSize, fields, filters);
         }
-        throw new Error(`filters require responsePath to select a JSON array, but ${responsePath || '/'} selects ${jsonType(selected)}. Use describe=true to find an array path.`);
+        throw invalidResponseControls(`filters require responsePath to select a JSON array, but ${responsePath || '/'} selects ${jsonType(selected)}. Use describe=true to find an array path.`);
       }
       inferredResponsePath = joinResponsePath(responsePath, inferred.path);
       selectedArray = inferred.value;

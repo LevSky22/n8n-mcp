@@ -28,6 +28,7 @@ export const queryResponseArtifactDoc: ToolDocumentation = {
       'On a selected object, fields or filters infer exactly one array child and report its full pointer as responseMeta.inferredResponsePath; ambiguous shapes still need a more specific responsePath.',
       'pageSize is limited to 1-100. Request another semantic page only when the current page did not answer the question.',
       'For another page, pass responseMeta.nextCursor as cursor and keep all other query-view arguments unchanged.',
+      'Caller-correctable failures return structured error codes without generic n8n parameter diagnostics.',
       'An unknown artifactId means the handle expired or the server restarted — re-run the tool that produced it.'
     ]
   },
@@ -111,7 +112,7 @@ Arrays page by element and objects page by entry.`,
     ],
     performance: 'Fast - local artifact read; cost scales with the selected page, not the artifact size',
     errorHandling:
-      'INVALID_RESPONSE_PATH means the pointer was absent both exactly and beneath any non-empty responseRoot. Use the attempted canonical path, reported parent, and available children; omit responsePath to restore the advertised responseRoot, or describe a valid parent. An unknown artifactId means the handle expired (24 hour ceiling) or the MCP server restarted; re-run the originating tool to mint a new one.',
+      'Caller-correctable failures are schema-valid isError results: INVALID_RESPONSE_PATH for an unresolved pointer, INVALID_RESPONSE_CONTROLS for incompatible or malformed query controls, INVALID_RESPONSE_CURSOR for a stale or mismatched cursor, and INVALID_ARTIFACT_HANDLE for an unusable handle. INVALID_RESPONSE_PATH includes the attempted canonical path, reported parent, and available children. Internal storage, corruption, and hard-limit failures remain server errors.',
     bestPractices: [
       'Omit responsePath for the first query; use describe=true when the default root\'s shape is unfamiliar',
       'Prefer primaryPaths over pointers copied from an inline preview',

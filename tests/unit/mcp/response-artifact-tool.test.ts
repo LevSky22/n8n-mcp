@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from 'fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import path from 'path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -125,6 +125,79 @@ describe('response artifact MCP tool', () => {
       remainingCount: 0,
     });
     expect(response.structuredContent).toEqual(result);
+  });
+
+  it('normalizes a non-empty response root through the MCP tool boundary', async () => {
+    const artifact = persistResponseArtifact({
+      response: { rows: [{ id: 1 }, { id: 2 }] },
+    }, 'default-instance');
+    const metaPath = path.join(root, `response-${artifact.id}.meta.json`);
+    const metadata = JSON.parse(readFileSync(metaPath, 'utf8'));
+    metadata.responseRoot = '/response';
+    writeFileSync(metaPath, JSON.stringify(metadata));
+
+    const response = await new TestableN8NMCPServer().testCallTool('query_response_artifact', {
+      artifactId: artifact.id,
+      responsePath: '/rows',
+      fields: ['id'],
+      pageSize: 1,
+    });
+
+    expect(response.isError).not.toBe(true);
+    expect(response.structuredContent).toMatchObject({
+      responsePath: '/response/rows',
+      response: [{ id: 1 }],
+      responseMeta: { inferredResponsePath: '/response/rows' },
+    });
+  });
+
+  it.each([
+    ['INVALID_RESPONSE_PATH', { responsePath: '/missing' }],
+    ['INVALID_RESPONSE_CONTROLS', { responsePath: 'rows' }],
+    ['INVALID_RESPONSE_CURSOR', { cursor: 'short' }],
+  ])('returns a bounded structured %s error without generic diagnostics', async (code, controls) => {
+    const artifact = persistResponseArtifact({ rows: [{ id: 1 }, { id: 2 }] }, 'default-instance');
+    const response = await new TestableN8NMCPServer().testCallTool('query_response_artifact', {
+      artifactId: artifact.id,
+      responsePath: '/rows',
+      pageSize: 1,
+      ...controls,
+    });
+
+    expect(response.isError).toBe(true);
+    expect(response.structuredContent.response.error.code).toBe(code);
+    expect(response.structuredContent.responseMeta).toMatchObject({
+      contractVersion: 3,
+      complete: false,
+      nextCursor: null,
+    });
+    expect(response.structuredContent.responseMeta.serializedBytes).toBeGreaterThan(0);
+    expect(response.content[0].text).not.toContain('Error executing tool');
+    expect(response.content[0].text).not.toContain('[Diagnostic]');
+    expect(Buffer.byteLength(JSON.stringify(response.structuredContent))).toBeLessThan(8 * 1024);
+  });
+
+  it('returns a structured unusable-handle error without disclosing raw values', async () => {
+    const response = await new TestableN8NMCPServer().testCallTool('query_response_artifact', {
+      artifactId: 'a'.repeat(48),
+    });
+
+    expect(response.isError).toBe(true);
+    expect(response.structuredContent.response.error.code).toBe('INVALID_ARTIFACT_HANDLE');
+    expect(response.content[0].text).not.toContain('[Diagnostic]');
+  });
+
+  it('keeps corrupt artifact storage failures on the generic server-error path', async () => {
+    const artifact = persistResponseArtifact({ rows: [{ id: 1 }] }, 'default-instance');
+    writeFileSync(path.join(root, `response-${artifact.id}.json`), '{not-json');
+
+    const response = await new TestableN8NMCPServer().testCallTool('query_response_artifact', {
+      artifactId: artifact.id,
+    });
+
+    expect(response.isError).toBe(true);
+    expect(response.structuredContent).toBeUndefined();
+    expect(response.content[0].text).toContain('Error executing tool query_response_artifact');
   });
 
   it('reads a small descriptor resource without exposing stored values', async () => {

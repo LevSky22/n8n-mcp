@@ -101,6 +101,9 @@ JSON as compact text and `structuredContent`. When an originating call creates a
 artifact, its result also includes an `artifact://n8n-mcp/{artifactId}` resource link.
 Reading that link returns at most 8 KiB of metadata and query guidance; it never returns
 the stored provider payload. Ephemeral artifacts are not added to `resources/list`.
+Caller-correctable path, control, cursor, and handle failures also use the output
+schema with `isError: true` and a stable error code. Internal storage, corruption,
+and hard-limit failures remain server errors instead of being hidden as input mistakes.
 
 Every bounded result reports `responseMeta.complete`, returned/total/remaining
 counts, and an opaque next cursor. A compact preview is never exhaustive when
