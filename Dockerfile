@@ -35,8 +35,9 @@ RUN npx tsc -p tsconfig.build.json
 FROM node:22-alpine AS runtime
 WORKDIR /app
 
-# Install only essential runtime tools
-RUN apk add --no-cache curl su-exec && \
+# Install only essential runtime tools, after applying current base-image fixes.
+RUN apk upgrade --no-cache && \
+    apk add --no-cache curl su-exec && \
     rm -rf /var/cache/apk/*
 
 # Copy runtime-only package.json
