@@ -475,6 +475,37 @@ describe('WorkflowDiffEngine', () => {
       expect(codeNode?.parameters.jsCode).toBe('const x = 1;\nreturn x + 3;');
     });
 
+    it('should insert __patch_find_replace replacement literally when it contains $ patterns (#1012)', async () => {
+      const workflow = JSON.parse(JSON.stringify(baseWorkflow));
+      workflow.nodes.push({
+        id: 'code-1',
+        name: 'Code',
+        type: 'n8n-nodes-base.code',
+        typeVersion: 1,
+        position: [900, 300],
+        parameters: { jsCode: '// anchor\nreturn items;' }
+      });
+
+      const result = await diffEngine.applyDiff(workflow, {
+        id: 'test',
+        operations: [{
+          type: 'updateNode' as const,
+          nodeName: 'Code',
+          updates: {
+            'parameters.jsCode': {
+              __patch_find_replace: [
+                { find: '// anchor', replace: "const money = '$' + total;" }
+              ]
+            }
+          }
+        }]
+      });
+
+      expect(result.success).toBe(true);
+      const codeNode = result.workflow.nodes.find((n: any) => n.name === 'Code');
+      expect(codeNode?.parameters.jsCode).toBe("const money = '$' + total;\nreturn items;");
+    });
+
     it('should apply multiple sequential __patch_find_replace patches', async () => {
       const workflow = JSON.parse(JSON.stringify(baseWorkflow));
       workflow.nodes.push({
@@ -594,6 +625,72 @@ describe('WorkflowDiffEngine', () => {
       expect(result.success).toBe(true);
       expect(result.warnings).toBeDefined();
       expect(result.warnings!.some(w => w.message.includes('not found'))).toBe(true);
+    });
+
+    it('should let __patch_find_replace edit a field that was already broken before patching', async () => {
+      const workflow = JSON.parse(JSON.stringify(baseWorkflow));
+      workflow.nodes.push({
+        id: 'code-1',
+        name: 'Code',
+        type: 'n8n-nodes-base.code',
+        typeVersion: 1,
+        position: [900, 300],
+        parameters: { jsCode: 'const x = (;\nreturn x;' }
+      });
+
+      const result = await diffEngine.applyDiff(workflow, {
+        id: 'test',
+        operations: [{
+          type: 'updateNode' as const,
+          nodeName: 'Code',
+          updates: {
+            'parameters.jsCode': {
+              __patch_find_replace: [
+                // Still broken afterwards — allowed, the field was broken before
+                { find: 'return x;', replace: 'return x + 1;' }
+              ]
+            }
+          }
+        }]
+      });
+
+      expect(result.success).toBe(true);
+      const codeNode = result.workflow!.nodes.find((n: any) => n.name === 'Code');
+      expect(codeNode?.parameters.jsCode).toBe('const x = (;\nreturn x + 1;');
+    });
+
+    it('should reject __patch_find_replace patches that leave jsCode with a syntax error', async () => {
+      const original = 'const items = getItems();\nreturn items.filter(i => i.ok);';
+      const workflow = JSON.parse(JSON.stringify(baseWorkflow));
+      workflow.nodes.push({
+        id: 'code-1',
+        name: 'Code',
+        type: 'n8n-nodes-base.code',
+        typeVersion: 1,
+        position: [900, 300],
+        parameters: { jsCode: original }
+      });
+
+      const result = await diffEngine.applyDiff(workflow, {
+        id: 'test',
+        operations: [{
+          type: 'updateNode' as const,
+          nodeName: 'Code',
+          updates: {
+            'parameters.jsCode': {
+              __patch_find_replace: [
+                // Removes the closing paren of filter(...) — corrupts the code
+                { find: 'i.ok);', replace: 'i.ok;' }
+              ]
+            }
+          }
+        }]
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.errors?.[0]?.message).toContain('invalid JavaScript');
+      const codeNode = workflow.nodes.find((n: any) => n.name === 'Code');
+      expect(codeNode?.parameters.jsCode).toBe(original);
     });
 
     it.each([false, true])('should validate connection operations before later rename projections when validateOnly=%s', async (validateOnly) => {
@@ -876,6 +973,87 @@ describe('WorkflowDiffEngine', () => {
       expect(result.success).toBe(true);
       const codeNode = result.workflow.nodes.find((n: any) => n.name === 'Code');
       expect(codeNode?.parameters.jsCode).toBe('const a = 10;\nconst b = 20;\nreturn a + b;');
+    });
+
+    it('should insert replacement text literally when it contains $ patterns (#1012)', async () => {
+      const workflow = JSON.parse(JSON.stringify(baseWorkflow));
+      workflow.nodes.push({
+        id: 'code-1',
+        name: 'Code',
+        type: 'n8n-nodes-base.code',
+        typeVersion: 1,
+        position: [900, 300],
+        parameters: { jsCode: '// anchor\nconst rest = 1;\nreturn rest;' }
+      });
+
+      // "$'" is the dangerous case from #1012: a bare-string replacer would
+      // splice everything after the match into the insertion.
+      const replacement = "const money = '$' + amount.toFixed(2); // $& $` $' $1 $$ $<name>";
+      const result = await diffEngine.applyDiff(workflow, {
+        id: 'test',
+        operations: [{
+          type: 'patchNodeField' as const,
+          nodeName: 'Code',
+          fieldPath: 'parameters.jsCode',
+          patches: [{ find: '// anchor', replace: replacement }]
+        }]
+      });
+
+      expect(result.success).toBe(true);
+      const codeNode = result.workflow.nodes.find((n: any) => n.name === 'Code');
+      expect(codeNode?.parameters.jsCode).toBe(`${replacement}\nconst rest = 1;\nreturn rest;`);
+    });
+
+    it('should keep $ literal in literal mode with replaceAll', async () => {
+      const workflow = JSON.parse(JSON.stringify(baseWorkflow));
+      workflow.nodes.push({
+        id: 'code-1',
+        name: 'Code',
+        type: 'n8n-nodes-base.code',
+        typeVersion: 1,
+        position: [900, 300],
+        parameters: { jsCode: 'const a = AMOUNT;\nconst b = AMOUNT;' }
+      });
+
+      const result = await diffEngine.applyDiff(workflow, {
+        id: 'test',
+        operations: [{
+          type: 'patchNodeField' as const,
+          nodeName: 'Code',
+          fieldPath: 'parameters.jsCode',
+          patches: [{ find: 'AMOUNT', replace: "'$' + n", replaceAll: true }]
+        }]
+      });
+
+      expect(result.success).toBe(true);
+      const codeNode = result.workflow.nodes.find((n: any) => n.name === 'Code');
+      expect(codeNode?.parameters.jsCode).toBe("const a = '$' + n;\nconst b = '$' + n;");
+    });
+
+    it('should support capture group references in regex mode replacements', async () => {
+      const workflow = JSON.parse(JSON.stringify(baseWorkflow));
+      workflow.nodes.push({
+        id: 'code-1',
+        name: 'Code',
+        type: 'n8n-nodes-base.code',
+        typeVersion: 1,
+        position: [900, 300],
+        parameters: { jsCode: 'const limit = 42;' }
+      });
+
+      const result = await diffEngine.applyDiff(workflow, {
+        id: 'test',
+        operations: [{
+          type: 'patchNodeField' as const,
+          nodeName: 'Code',
+          fieldPath: 'parameters.jsCode',
+          patches: [{ find: 'const limit = (\\d+)', replace: 'const limit = $1 * 2', regex: true }]
+        }]
+      });
+
+      expect(result.success).toBe(true);
+      const codeNode = result.workflow.nodes.find((n: any) => n.name === 'Code');
+      expect(codeNode?.parameters.jsCode).toBe('const limit = 42 * 2;');
     });
 
     it('should support regex pattern matching', async () => {
@@ -1256,6 +1434,361 @@ describe('WorkflowDiffEngine', () => {
       expect(result.success).toBe(true);
       const codeNode = result.workflow.nodes.find((n: any) => n.id === 'code-1');
       expect(codeNode?.parameters.jsCode).toBe('const x = 2;');
+    });
+
+    describe('JavaScript syntax guard on code fields', () => {
+      const codeWorkflow = (jsCode: string) => {
+        const workflow = JSON.parse(JSON.stringify(baseWorkflow));
+        workflow.nodes.push({
+          id: 'code-1',
+          name: 'Code',
+          type: 'n8n-nodes-base.code',
+          typeVersion: 1,
+          position: [900, 300],
+          parameters: { jsCode }
+        });
+        return workflow;
+      };
+
+      it('should reject a patch that leaves parameters.jsCode with a syntax error, without touching the workflow', async () => {
+        const original = 'const items = getItems();\nreturn items.filter(i => i.ok);';
+        const workflow = codeWorkflow(original);
+
+        const result = await diffEngine.applyDiff(workflow, {
+          id: 'test',
+          operations: [{
+            type: 'patchNodeField' as const,
+            nodeName: 'Code',
+            fieldPath: 'parameters.jsCode',
+            // Removes the closing paren of filter(...) — corrupts the code
+            patches: [{ find: 'i.ok);', replace: 'i.ok;' }]
+          }]
+        });
+
+        expect(result.success).toBe(false);
+        expect(result.errors?.[0]?.message).toContain('invalid JavaScript');
+        expect(result.errors?.[0]?.message).toContain('parameters.jsCode');
+        const codeNode = workflow.nodes.find((n: any) => n.name === 'Code');
+        expect(codeNode?.parameters.jsCode).toBe(original);
+      });
+
+      it('should not block patches to a field that was already broken before patching', async () => {
+        // Incremental repair of pre-existing corruption (e.g. saved by the
+        // pre-2.71.1 bug) must not be blamed on the patch.
+        const workflow = codeWorkflow('const items = getItems(;\nreturn items.filter(i => i.ok);');
+
+        const result = await diffEngine.applyDiff(workflow, {
+          id: 'test',
+          operations: [{
+            type: 'patchNodeField' as const,
+            nodeName: 'Code',
+            fieldPath: 'parameters.jsCode',
+            // Fixes one problem while the code stays broken overall
+            patches: [{ find: 'i => i.ok);', replace: 'i => i.ok;' }]
+          }]
+        });
+
+        expect(result.success).toBe(true);
+        const codeNode = result.workflow.nodes.find((n: any) => n.name === 'Code');
+        expect(codeNode?.parameters.jsCode).toBe('const items = getItems(;\nreturn items.filter(i => i.ok;');
+      });
+
+      it('should accept patched code with top-level return and await', async () => {
+        const workflow = codeWorkflow('const res = await fetch(url);\nreturn res;');
+
+        const result = await diffEngine.applyDiff(workflow, {
+          id: 'test',
+          operations: [{
+            type: 'patchNodeField' as const,
+            nodeName: 'Code',
+            fieldPath: 'parameters.jsCode',
+            patches: [{ find: 'fetch(url)', replace: 'fetch(url, { method: "POST" })' }]
+          }]
+        });
+
+        expect(result.success).toBe(true);
+      });
+
+      it('should only check the final result of one operation\'s patches array', async () => {
+        const workflow = codeWorkflow('function pick(item) { return item.id; }\nreturn items.map(pick);');
+
+        const result = await diffEngine.applyDiff(workflow, {
+          id: 'test',
+          operations: [{
+            type: 'patchNodeField' as const,
+            nodeName: 'Code',
+            fieldPath: 'parameters.jsCode',
+            // First patch alone leaves an unbalanced brace; second restores balance
+            patches: [
+              { find: 'return item.id; }', replace: 'return item.id ?? null;' },
+              { find: '?? null;', replace: '?? null; }' }
+            ]
+          }]
+        });
+
+        expect(result.success).toBe(true);
+        const codeNode = result.workflow.nodes.find((n: any) => n.name === 'Code');
+        expect(codeNode?.parameters.jsCode).toBe(
+          'function pick(item) { return item.id ?? null; }\nreturn items.map(pick);'
+        );
+      });
+
+      it('should allow a patch that repairs previously broken code', async () => {
+        const workflow = codeWorkflow('const x = (;\nreturn x;');
+
+        const result = await diffEngine.applyDiff(workflow, {
+          id: 'test',
+          operations: [{
+            type: 'patchNodeField' as const,
+            nodeName: 'Code',
+            fieldPath: 'parameters.jsCode',
+            patches: [{ find: 'const x = (;', replace: 'const x = 1;' }]
+          }]
+        });
+
+        expect(result.success).toBe(true);
+        const codeNode = result.workflow.nodes.find((n: any) => n.name === 'Code');
+        expect(codeNode?.parameters.jsCode).toBe('const x = 1;\nreturn x;');
+      });
+
+      it('should guard the result of regex-mode patches too', async () => {
+        const workflow = codeWorkflow('const limit = 10;\nreturn limit;');
+
+        const result = await diffEngine.applyDiff(workflow, {
+          id: 'test',
+          operations: [{
+            type: 'patchNodeField' as const,
+            nodeName: 'Code',
+            fieldPath: 'parameters.jsCode',
+            patches: [{ find: 'const limit = (\\d+);', replace: 'const limit = $1)(', regex: true }]
+          }]
+        });
+
+        expect(result.success).toBe(false);
+        expect(result.errors?.[0]?.message).toContain('invalid JavaScript');
+      });
+
+      it('should never execute the checked code', async () => {
+        delete (globalThis as any).__syntaxGuardSentinel;
+        const workflow = codeWorkflow('return 1;');
+
+        const result = await diffEngine.applyDiff(workflow, {
+          id: 'test',
+          operations: [{
+            type: 'patchNodeField' as const,
+            nodeName: 'Code',
+            fieldPath: 'parameters.jsCode',
+            patches: [{ find: 'return 1;', replace: 'globalThis.__syntaxGuardSentinel = true;\nreturn 1;' }]
+          }]
+        });
+
+        expect(result.success).toBe(true);
+        expect((globalThis as any).__syntaxGuardSentinel).toBeUndefined();
+      });
+
+      it('should reject patching valid code into an oversized unverifiable blob without parsing it', async () => {
+        const workflow = codeWorkflow('return 1;');
+        const oversized = 'const x = (;\n' + '// filler\n'.repeat(120_000);
+
+        const result = await diffEngine.applyDiff(workflow, {
+          id: 'test',
+          operations: [{
+            type: 'patchNodeField' as const,
+            nodeName: 'Code',
+            fieldPath: 'parameters.jsCode',
+            // Over 1MB: never parsed (DoS protection), but a checkably-valid
+            // field must not silently become an unverifiable blob
+            patches: [{ find: 'return 1;', replace: oversized }]
+          }]
+        });
+
+        expect(result.success).toBe(false);
+        expect(result.errors?.[0]?.message).toContain('could not verify');
+        expect(result.errors?.[0]?.message).toContain('updateNode');
+      });
+
+      it('should reject patching valid code into nesting the parser cannot check', async () => {
+        const workflow = codeWorkflow('return 1;');
+        const nested = 'return ' + '('.repeat(50_000) + '1' + ')'.repeat(50_000) + ';';
+
+        const result = await diffEngine.applyDiff(workflow, {
+          id: 'test',
+          operations: [{
+            type: 'patchNodeField' as const,
+            nodeName: 'Code',
+            fieldPath: 'parameters.jsCode',
+            // Too deep for V8's parser stack: RangeError, not SyntaxError —
+            // uncheckable, and the baseline was checkably valid, so reject
+            patches: [{ find: 'return 1;', replace: nested }]
+          }]
+        });
+
+        expect(result.success).toBe(false);
+        expect(result.errors?.[0]?.message).toContain('could not verify');
+      });
+
+      it('should let patches through when the baseline itself is unverifiable', async () => {
+        // An oversized field gives no standard to hold the patch to — the
+        // guard steps aside instead of trapping the field forever.
+        const oversized = 'const x = (;\n' + '// filler\n'.repeat(120_000);
+        const workflow = codeWorkflow(oversized);
+
+        const result = await diffEngine.applyDiff(workflow, {
+          id: 'test',
+          operations: [{
+            type: 'patchNodeField' as const,
+            nodeName: 'Code',
+            fieldPath: 'parameters.jsCode',
+            patches: [{ find: 'const x = (;', replace: 'const y = (;' }]
+          }]
+        });
+
+        expect(result.success).toBe(true);
+      });
+
+      it('should reject a patch that strips an expression prefix leaving broken plain JS', async () => {
+        // The original runs as "{{ $json.code }}" after n8n's "=" strip —
+        // nested blocks, which parse — so the broken result is a regression.
+        const workflow = codeWorkflow('={{ $json.code }}');
+
+        const result = await diffEngine.applyDiff(workflow, {
+          id: 'test',
+          operations: [{
+            type: 'patchNodeField' as const,
+            nodeName: 'Code',
+            fieldPath: 'parameters.jsCode',
+            patches: [{ find: '={{ $json.code }}', replace: 'return items.filter(;' }]
+          }]
+        });
+
+        expect(result.success).toBe(false);
+        expect(result.errors?.[0]?.message).toContain('invalid JavaScript');
+      });
+
+      it('should guard functionCode fields on legacy Function nodes', async () => {
+        const workflow = JSON.parse(JSON.stringify(baseWorkflow));
+        workflow.nodes.push({
+          id: 'fn-1',
+          name: 'Function',
+          type: 'n8n-nodes-base.function',
+          typeVersion: 1,
+          position: [900, 300],
+          parameters: { functionCode: 'items[0].json.done = true;\nreturn items;' }
+        });
+
+        const result = await diffEngine.applyDiff(workflow, {
+          id: 'test',
+          operations: [{
+            type: 'patchNodeField' as const,
+            nodeName: 'Function',
+            fieldPath: 'parameters.functionCode',
+            // Leaves an unterminated member expression
+            patches: [{ find: 'json.done = true;', replace: 'json.done = ;' }]
+          }]
+        });
+
+        expect(result.success).toBe(false);
+        expect(result.errors?.[0]?.message).toContain('invalid JavaScript');
+      });
+
+      it('should let later operations proceed after a guard rejection in continueOnError mode', async () => {
+        const workflow = codeWorkflow('const x = 1;\nreturn x;');
+
+        const result = await diffEngine.applyDiff(workflow, {
+          id: 'test',
+          continueOnError: true,
+          operations: [
+            {
+              type: 'patchNodeField' as const,
+              nodeName: 'Code',
+              fieldPath: 'parameters.jsCode',
+              patches: [{ find: 'return x;', replace: 'return x);' }]
+            },
+            { type: 'addTag' as const, tag: 'after-guard' }
+          ]
+        });
+
+        expect(result.failed).toContain(0);
+        expect(result.applied).toContain(1);
+        const codeNode = result.workflow!.nodes.find((n: any) => n.name === 'Code');
+        expect(codeNode?.parameters.jsCode).toBe('const x = 1;\nreturn x;');
+      });
+
+      it('should strip a leading = like n8n does and reject broken code behind it', async () => {
+        // jsCode is a noDataExpression field: n8n strips one leading "=" and
+        // runs the rest as code, so "=return (" is broken code, not an
+        // expression — the guard must not treat "=" as an exemption.
+        const workflow = codeWorkflow('return 1;');
+
+        const result = await diffEngine.applyDiff(workflow, {
+          id: 'test',
+          operations: [{
+            type: 'patchNodeField' as const,
+            nodeName: 'Code',
+            fieldPath: 'parameters.jsCode',
+            patches: [{ find: 'return 1;', replace: '=return (' }]
+          }]
+        });
+
+        expect(result.success).toBe(false);
+        expect(result.errors?.[0]?.message).toContain('invalid JavaScript');
+      });
+
+      it('should accept a valid =-prefixed value the way n8n will run it', async () => {
+        const workflow = codeWorkflow('return 1;');
+
+        const result = await diffEngine.applyDiff(workflow, {
+          id: 'test',
+          operations: [{
+            type: 'patchNodeField' as const,
+            nodeName: 'Code',
+            fieldPath: 'parameters.jsCode',
+            // n8n runs this as "return 2;" after stripping the "="
+            patches: [{ find: 'return 1;', replace: '=return 2;' }]
+          }]
+        });
+
+        expect(result.success).toBe(true);
+      });
+
+      it('should not check pythonCode fields', async () => {
+        const workflow = JSON.parse(JSON.stringify(baseWorkflow));
+        workflow.nodes.push({
+          id: 'code-1',
+          name: 'Code',
+          type: 'n8n-nodes-base.code',
+          typeVersion: 2,
+          position: [900, 300],
+          parameters: { language: 'python', pythonCode: 'def pick(item):\n    return item' }
+        });
+
+        const result = await diffEngine.applyDiff(workflow, {
+          id: 'test',
+          operations: [{
+            type: 'patchNodeField' as const,
+            nodeName: 'Code',
+            fieldPath: 'parameters.pythonCode',
+            patches: [{ find: 'return item', replace: 'return item.get("id")' }]
+          }]
+        });
+
+        expect(result.success).toBe(true);
+      });
+
+      it('should not check non-code string fields', async () => {
+        const result = await diffEngine.applyDiff(baseWorkflow, {
+          id: 'test',
+          operations: [{
+            type: 'patchNodeField' as const,
+            nodeId: 'http-1',
+            fieldPath: 'parameters.url',
+            // A URL is not JavaScript; the guard must not reject it
+            patches: [{ find: 'api.example.com', replace: 'api.example.com/v2(beta' }]
+          }]
+        });
+
+        expect(result.success).toBe(true);
+      });
     });
   });
 

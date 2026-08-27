@@ -5,6 +5,7 @@ vi.mock('dns/promises', () => ({
   lookup: vi.fn(),
 }));
 
+import http from 'http';
 import { SSRFProtection } from '../../../src/utils/ssrf-protection';
 import * as dns from 'dns/promises';
 
@@ -589,12 +590,62 @@ describe('SSRFProtection', () => {
         'http://192.168.1.1',
         'http://172.16.0.1',
         'http://172.31.255.255',
+        'http://224.0.0.1',    // multicast
+        'http://100.64.1.1',   // RFC 6598 CGNAT
       ];
       for (const url of privateUrls) {
         const result = SSRFProtection.validateUrlSync(url);
         expect(result.valid, `url=${url}`).toBe(false);
         expect(result.reason).toContain('Private IP');
       }
+    });
+
+    it('should not treat DNS hostnames with leading digits as IPv4 literals (#984)', () => {
+      // PRIVATE_IP_RANGES are prefix regexes over the raw hostname, so without
+      // the isIPv4 gate a DNS name whose first label matches a blocked first
+      // octet (`247.` hits the 224-255 reserved-range regexes) is refused.
+      delete process.env.WEBHOOK_SECURITY_MODE; // strict default
+      const dnsHostnameUrls = [
+        'http://247.example.com',
+        'http://224.foo.com',
+        'http://10.example.com',
+        'http://100.64.evil.example',
+      ];
+      for (const url of dnsHostnameUrls) {
+        const result = SSRFProtection.validateUrlSync(url);
+        expect(result.valid, `url=${url}`).toBe(true);
+        expect(result.reason).toBeUndefined();
+      }
+    });
+
+    it('rejects non-canonical IPv4 forms via WHATWG URL normalization (#984)', () => {
+      // The isIPv4 gate relies on the URL parser canonicalizing every
+      // numeric host form to dotted-quad before validateUrlSync sees it.
+      delete process.env.WEBHOOK_SECURITY_MODE; // strict default
+      const nonCanonicalPrivate = [
+        'http://0x7f.0.0.1',   // hex -> 127.0.0.1
+        'http://0177.0.0.1',   // octal -> 127.0.0.1
+        'http://2130706433',   // integer -> 127.0.0.1
+        'http://127.1',        // short form -> 127.0.0.1
+        'http://0xa.0.0.1',    // hex -> 10.0.0.1
+      ];
+      for (const url of nonCanonicalPrivate) {
+        const result = SSRFProtection.validateUrlSync(url);
+        expect(result.valid, `url=${url}`).toBe(false);
+      }
+    });
+
+    it('still blocks a digit-labelled hostname at DNS resolution when it resolves privately (#984)', async () => {
+      // The async validator is the real control behind the loosened sync
+      // pre-filter: `10.example.com` passes validateUrlSync but must be
+      // rejected once DNS shows it resolves to a private address.
+      delete process.env.WEBHOOK_SECURITY_MODE; // strict default
+      expect(SSRFProtection.validateUrlSync('http://10.example.com').valid).toBe(true);
+
+      vi.mocked(dns.lookup).mockResolvedValue({ address: '10.0.0.1', family: 4 } as any);
+      const result = await SSRFProtection.validateWebhookUrl('http://10.example.com');
+      expect(result.valid).toBe(false);
+      expect(result.reason).toContain('Private IP');
     });
 
     it('should reject private IPv4 literals in moderate mode', () => {
@@ -985,6 +1036,7 @@ describe('SSRFProtection', () => {
       expect(result.valid).toBe(true);
       expect(result.address).toBe('93.184.216.34');
       expect(result.family).toBe(4);
+      expect(result.addresses).toEqual([{ address: '93.184.216.34', family: 4 }]);
     });
 
     it('should return IPv6 family when hostname resolves to v6', async () => {
@@ -993,10 +1045,82 @@ describe('SSRFProtection', () => {
       expect(result.valid).toBe(true);
       expect(result.address).toBe('2606:4700:4700::1111');
       expect(result.family).toBe(6);
+      expect(result.addresses).toEqual([{ address: '2606:4700:4700::1111', family: 6 }]);
     });
 
-    it('createPinnedAgents lookup returns the pinned IP regardless of hostname', () => {
-      const { httpAgent, httpsAgent } = SSRFProtection.createPinnedAgents('93.184.216.34', 4);
+    it('validateWebhookUrl with a multi-address DNS answer returns every validated address', async () => {
+      vi.mocked(dns.lookup).mockResolvedValue([
+        { address: '93.184.216.34', family: 4 },
+        { address: '2606:4700:4700::1111', family: 6 },
+      ] as any);
+
+      const result = await SSRFProtection.validateWebhookUrl('https://multi.example.com');
+      expect(result.valid).toBe(true);
+      expect(result.address).toBe('93.184.216.34');
+      expect(result.family).toBe(4);
+      expect(result.addresses).toEqual([
+        { address: '93.184.216.34', family: 4 },
+        { address: '2606:4700:4700::1111', family: 6 },
+      ]);
+    });
+
+    it('fails closed when any address in a mixed-record answer is disallowed', async () => {
+      // One legitimate public IP alongside a cloud-metadata IP: the whole
+      // hostname must be rejected, not just have the bad address ignored.
+      vi.mocked(dns.lookup).mockResolvedValue([
+        { address: '93.184.216.34', family: 4 },
+        { address: '169.254.169.254', family: 4 },
+      ] as any);
+
+      const result = await SSRFProtection.validateWebhookUrl('https://mixed-record.example.com');
+      expect(result.valid).toBe(false);
+      expect(result.reason).toBe('Hostname resolves to cloud metadata endpoint');
+      expect(result.address).toBeUndefined();
+      expect(result.addresses).toBeUndefined();
+    });
+
+    it('wrapped createConnection pins the lookup and enables autoSelectFamily fallback', () => {
+      const proto = http.Agent.prototype as any;
+      const original = proto.createConnection;
+      let seenOptions: any;
+      proto.createConnection = function (options: any) {
+        seenOptions = options;
+        // Minimal socket stand-in; the agent only needs an object back.
+        return { on: () => {}, once: () => {}, setNoDelay: () => {}, destroy: () => {} };
+      };
+      try {
+        const { httpAgent } = SSRFProtection.createPinnedAgents([
+          { address: '203.0.113.10', family: 4 },
+          { address: '2001:db8::1', family: 6 },
+        ]);
+        (httpAgent as any).createConnection({ host: 'pinned.example.test', port: 80 }, () => {});
+      } finally {
+        proto.createConnection = original;
+      }
+
+      expect(typeof seenOptions.lookup).toBe('function');
+      // Every currently supported Node exposes autoSelectFamily; the option
+      // is what lets net.connect fall back across the pinned set (#978).
+      expect(seenOptions.autoSelectFamily).toBe(true);
+      expect(seenOptions.autoSelectFamilyAttemptTimeout).toBe(250);
+    });
+
+    it('fails closed on a metadata address in any record position even in permissive mode', async () => {
+      process.env.WEBHOOK_SECURITY_MODE = 'permissive';
+      vi.mocked(dns.lookup).mockResolvedValue([
+        { address: '93.184.216.34', family: 4 },
+        { address: '169.254.169.254', family: 4 },
+      ] as any);
+
+      const result = await SSRFProtection.validateWebhookUrl('https://mixed-permissive.example.com');
+      expect(result.valid).toBe(false);
+      expect(result.reason).toBe('Hostname resolves to cloud metadata endpoint');
+    });
+
+    it('createPinnedAgents lookup returns the first pinned address for the scalar shape', () => {
+      const { httpAgent, httpsAgent } = SSRFProtection.createPinnedAgents([
+        { address: '93.184.216.34', family: 4 },
+      ]);
       const httpLookup = (httpAgent as any).options.lookup;
       const httpsLookup = (httpsAgent as any).options.lookup;
       expect(typeof httpLookup).toBe('function');
@@ -1016,6 +1140,30 @@ describe('SSRFProtection', () => {
       ]);
     });
 
+    it('createPinnedAgents lookup returns the full pinned set for options.all', () => {
+      const addresses = [
+        { address: '93.184.216.34', family: 4 as const },
+        { address: '2606:4700:4700::1111', family: 6 as const },
+      ];
+      const { httpAgent } = SSRFProtection.createPinnedAgents(addresses);
+      const lookup = (httpAgent as any).options.lookup as Function;
+
+      let allResult: any;
+      lookup('rebind.example.test', { all: true }, (_err: any, result: any) => {
+        allResult = result;
+      });
+      expect(allResult).toEqual(addresses);
+
+      let firstAddress: string | undefined;
+      let firstFamily: number | undefined;
+      lookup('rebind.example.test', {}, (_err: any, address: string, family: number) => {
+        firstAddress = address;
+        firstFamily = family;
+      });
+      expect(firstAddress).toBe('93.184.216.34');
+      expect(firstFamily).toBe(4);
+    });
+
     it('pinned lookup ignores subsequent dns.lookup answers', async () => {
       // Validator DNS answer (the "good" IP). Subsequent dns.lookup calls
       // simulate an attacker-controlled resolver flipping to a private IP —
@@ -1032,10 +1180,7 @@ describe('SSRFProtection', () => {
       expect(validation.valid).toBe(true);
       expect(validation.address).toBe('1.1.1.1');
 
-      const { httpAgent } = SSRFProtection.createPinnedAgents(
-        validation.address!,
-        validation.family!
-      );
+      const { httpAgent } = SSRFProtection.createPinnedAgents(validation.addresses!);
 
       const transportCalls: Array<{ address: string; family: number }> = [];
       const lookup = (httpAgent as any).options.lookup as Function;
@@ -1057,17 +1202,24 @@ describe('SSRFProtection', () => {
     });
 
     it('agents disable keep-alive so connections do not leak across hosts', () => {
-      const { httpAgent, httpsAgent } = SSRFProtection.createPinnedAgents('1.2.3.4', 4);
+      const { httpAgent, httpsAgent } = SSRFProtection.createPinnedAgents([
+        { address: '1.2.3.4', family: 4 },
+      ]);
       expect((httpAgent as any).keepAlive).toBe(false);
       expect((httpsAgent as any).keepAlive).toBe(false);
     });
 
-    it('does not return address/family on rejection', async () => {
+    it('createPinnedAgents throws on an empty address list', () => {
+      expect(() => SSRFProtection.createPinnedAgents([])).toThrow();
+    });
+
+    it('does not return address/family/addresses on rejection', async () => {
       vi.mocked(dns.lookup).mockResolvedValue({ address: '169.254.169.254', family: 4 } as any);
       const result = await SSRFProtection.validateWebhookUrl('http://attacker.example');
       expect(result.valid).toBe(false);
       expect(result.address).toBeUndefined();
       expect(result.family).toBeUndefined();
+      expect(result.addresses).toBeUndefined();
     });
   });
 });

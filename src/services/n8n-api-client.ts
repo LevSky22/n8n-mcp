@@ -45,7 +45,7 @@ import {
   FolderListResponse,
   ProjectSummary,
 } from '../types/n8n-api';
-import { handleN8nApiError, logN8nError, N8nValidationError } from '../utils/n8n-errors';
+import { handleN8nApiError, logN8nError, N8nApiError, N8nValidationError } from '../utils/n8n-errors';
 import { encodeApiPathSegment } from '../utils/validation-schemas';
 import { cleanWorkflowForCreate, cleanWorkflowForUpdate } from './n8n-validation';
 import {
@@ -59,6 +59,7 @@ import {
   fetchN8nVersion,
   cleanSettingsForVersion,
   getCachedVersion,
+  versionAtLeast,
 } from './n8n-version';
 import type { PinnedAgents } from '../utils/ssrf-protection';
 
@@ -79,6 +80,46 @@ const GROUPS_UNSUPPORTED_WARNING =
   'This n8n version does not support canvas groups (added in 2.28); the workflow was saved without them.';
 const GROUP_DESCRIPTIONS_UNSUPPORTED_WARNING =
   'This n8n version does not support canvas group descriptions (added in 2.32); the descriptions were not saved.';
+
+/**
+ * Statuses that mean "this instance does not serve that route". A router without the route may
+ * answer 404 or 405 depending on whether it matches the path prefix before the method, and a
+ * politely retired alias may answer 410 rather than disappearing outright.
+ */
+const ROUTE_ABSENT_STATUSES = new Set([404, 405, 410]);
+
+/**
+ * HTTP status of a failed request from this client.
+ *
+ * The response interceptor converts every rejection to an `N8nApiError`, which carries
+ * `statusCode` and no `response`. Reading `error.response.status` on a rejection from
+ * `this.client` therefore always yields undefined - which silently disables any fallback
+ * keyed on a specific status. The raw-axios branch is kept for callers that bypass the
+ * interceptor, such as tests.
+ */
+function failureStatus(error: unknown): number | undefined {
+  if (error instanceof N8nApiError) return error.statusCode;
+  return (error as any)?.response?.status;
+}
+
+/**
+ * Whether a response carries an RFC 9745 `Deprecation` header.
+ *
+ * n8n sets one on the legacy activate/deactivate routes (`Deprecation: @<epoch>`), from a
+ * middleware that runs before the permission checks. Its presence proves the instance knows those
+ * routes are superseded, and therefore serves the routes that replaced them. The value is not
+ * parsed: a deprecation date tells us nothing we act on, only the header's presence does.
+ *
+ * Absence proves nothing - an older n8n has no header, and a proxy may drop it - so this is only
+ * ever read as a positive signal.
+ */
+function hasDeprecationHeader(headers: unknown): boolean {
+  if (!headers || typeof headers !== 'object') return false;
+  // Axios lowercases response header names, but a mock or a raw response may not.
+  return Object.entries(headers as Record<string, unknown>).some(
+    ([name, value]) => name.toLowerCase() === 'deprecation' && value !== undefined && value !== ''
+  );
+}
 
 /** The same write payload without `nodeGroups`, for instances whose schema has no such field. */
 function withoutNodeGroups(payload: Record<string, unknown>): Record<string, unknown> {
@@ -108,6 +149,11 @@ export class N8nApiClient {
   private personalProjectId: string | null = null;
   // SECURITY (GHSA-cmrh-wvq6-wm9r): cached pinned transport agents.
   private pinnedAgentsPromise: Promise<PinnedAgents> | null = null;
+  // #978/#989/#990: when the cached agents were last (re-)resolved, so a
+  // long-lived client periodically re-validates DNS instead of pinning to
+  // one address (possibly a stale CDN/Cloudflare edge) for its whole life.
+  private pinnedAgentsResolvedAt = 0;
+  private static readonly PINNED_AGENTS_TTL_MS = 60_000;
   private cfClientId?: string;
   private cfClientSecret?: string;
   /**
@@ -116,6 +162,12 @@ export class N8nApiClient {
    * group would permanently disable groups for the instance. Per-client, which is per-instance.
    */
   private groupSupport = { groups: true, descriptions: true };
+  /**
+   * Whether this instance is known to serve the modern publish/unpublish routes. Positive-only,
+   * and per-client, which is per-instance: it is set when the instance proves the routes exist
+   * and never cleared, because no response proves the opposite. See postPublishRoute.
+   */
+  private modernPublishRoute = false;
 
   constructor(config: N8nApiClientConfig) {
     const { baseUrl, apiKey, timeout = 30000, maxRetries = 3, cfClientId, cfClientSecret } = config;
@@ -183,14 +235,30 @@ export class N8nApiClient {
       }
     );
 
-    // Response interceptor for logging
+    // Response interceptor for logging + connection-failure retry
     this.client.interceptors.response.use(
       (response: any) => {
         logger.debug(`n8n API Response: ${response.status} ${response.config.url}`);
         return response;
       },
-      (error: unknown) => {
+      async (error: unknown) => {
+        // #978/#989/#990: retry connection-level failures (no response at
+        // all) before mapping to N8nApiError. Re-issuing goes back through
+        // this same interceptor pipeline, so a further failure is retried
+        // again automatically until maxRetries is exhausted.
+        const retryAttempt = this.tryRetry(error);
+        if (retryAttempt) {
+          return retryAttempt;
+        }
+
         const n8nError = handleN8nApiError(error);
+        if (n8nError.code === 'NO_RESPONSE') {
+          // SECURITY (GHSA-cmrh-wvq6-wm9r resilience): the pinned IP may be
+          // dead (CDN edge rotated, instance moved) - clear the cache so the
+          // *next* request re-resolves DNS instead of retrying the same bad
+          // address forever.
+          this.pinnedAgentsPromise = null;
+        }
         logN8nError(n8nError, 'n8n API Response');
         return Promise.reject(n8nError);
       }
@@ -198,13 +266,103 @@ export class N8nApiClient {
   }
 
   /**
+   * Retry a connection-level axios failure (no response received) when it
+   * looks safe to retry and attempts remain. Returns a promise for the
+   * retried request when a retry is attempted, or `undefined` when the
+   * caller should fall through to normal error mapping.
+   *
+   * @security GHSA-cmrh-wvq6-wm9r follow-up (#978/#989/#990) - the failure
+   * may mean the pinned IP has gone stale, so the pinned-agent cache is
+   * cleared before each retry to force fresh DNS resolution.
+   */
+  private tryRetry(error: unknown): Promise<any> | undefined {
+    const axiosError = error as any;
+    const config = axiosError?.config;
+    const noResponse = !!(axiosError && axiosError.request && !axiosError.response);
+    if (!noResponse || !config) {
+      return undefined;
+    }
+
+    const retryCount = (config as any).__retryCount || 0;
+    if (retryCount >= this.maxRetries) {
+      return undefined;
+    }
+
+    // Default to a non-idempotent classification when the method is missing:
+    // only pre-connection failures are then eligible for retry.
+    const method = String(config.method || '');
+    if (!this.isRetryableConnectionError(axiosError, method)) {
+      return undefined;
+    }
+
+    (config as any).__retryCount = retryCount + 1;
+    // Force fresh DNS on the retried attempt.
+    this.pinnedAgentsPromise = null;
+
+    const backoffMs = 250 * Math.pow(2, retryCount);
+    return new Promise((resolve, reject) => {
+      setTimeout(() => {
+        this.client.request(config).then(resolve, reject);
+      }, backoffMs);
+    });
+  }
+
+  /**
+   * Whether a connection-level axios error is safe to retry for the given
+   * HTTP method. Errors that occurred before any bytes reached the wire
+   * (connection refused/unreachable/DNS failure) are safe to retry
+   * regardless of method - the server never saw the request. Errors that may
+   * have interrupted an in-flight request (reset, timeout) are only retried
+   * for idempotent methods.
+   */
+  private isRetryableConnectionError(axiosError: any, method: string): boolean {
+    const codes = this.extractErrorCodes(axiosError);
+    if (codes.length === 0) return false;
+
+    const isIdempotent = method.toUpperCase() === 'GET' || method.toUpperCase() === 'HEAD';
+    const anyMethodCodes = new Set(['ECONNREFUSED', 'EHOSTUNREACH', 'ENETUNREACH', 'ENOTFOUND', 'EAI_AGAIN']);
+    const idempotentOnlyCodes = new Set(['ECONNRESET', 'ETIMEDOUT', 'ECONNABORTED']);
+
+    return codes.some(code => anyMethodCodes.has(code) || (isIdempotent && idempotentOnlyCodes.has(code)));
+  }
+
+  /**
+   * Collect every error `code` relevant to the retry decision: the error's
+   * own code, plus each member's code when the error is an AggregateError
+   * (e.g. from `autoSelectFamily` trying multiple pinned addresses).
+   */
+  private extractErrorCodes(error: any): string[] {
+    const codes: string[] = [];
+    if (error?.code) codes.push(error.code);
+
+    const aggregateMembers = error?.errors ?? error?.cause?.errors;
+    if (Array.isArray(aggregateMembers)) {
+      for (const member of aggregateMembers) {
+        if (member?.code) codes.push(member.code);
+      }
+    }
+    return codes;
+  }
+
+  /**
    * Resolve the configured baseUrl once and return HTTP/HTTPS agents that
-   * pin every connection to the validated IP.
+   * pin every connection to the validated address(es). Re-resolved when the
+   * cache is empty, has expired (TTL), or was invalidated after a
+   * connection failure — see {@link tryRetry} and the NO_RESPONSE branch of
+   * the response interceptor.
    *
    * @security GHSA-cmrh-wvq6-wm9r — without this, axios performs an
    * independent DNS lookup on every request, opening a TOCTOU window.
    */
   private getPinnedAgents(): Promise<PinnedAgents> {
+    const isExpired = this.pinnedAgentsPromise !== null &&
+      Date.now() - this.pinnedAgentsResolvedAt > N8nApiClient.PINNED_AGENTS_TTL_MS;
+    if (isExpired) {
+      // #978/#989/#990: don't stay pinned to a possibly-stale address (e.g.
+      // a rotated CDN/Cloudflare edge) for the whole process lifetime.
+      this.pinnedAgentsPromise = null;
+    }
+
     if (!this.pinnedAgentsPromise) {
       const promise = (async () => {
         const { SSRFProtection } = await import('../utils/ssrf-protection');
@@ -212,8 +370,21 @@ export class N8nApiClient {
         if (!validation.valid || !validation.address || !validation.family) {
           throw new Error(`SSRF protection: ${validation.reason || 'baseUrl rejected'}`);
         }
-        return SSRFProtection.createPinnedAgents(validation.address, validation.family);
+        return SSRFProtection.createPinnedAgents(
+          validation.addresses ?? [{ address: validation.address, family: validation.family }]
+        );
       })();
+      // Stamp at dispatch so concurrent callers during an in-flight
+      // re-resolution see a fresh TTL and don't each kick off their own
+      // lookup; refresh on fulfillment (only while still the current
+      // promise) so the window restarts from when the addresses actually
+      // became valid.
+      this.pinnedAgentsResolvedAt = Date.now();
+      promise.then(() => {
+        if (this.pinnedAgentsPromise === promise) {
+          this.pinnedAgentsResolvedAt = Date.now();
+        }
+      }, () => {});
       // Reset on rejection so transient DNS failures don't brick the client.
       promise.catch(() => {
         if (this.pinnedAgentsPromise === promise) {
@@ -228,6 +399,16 @@ export class N8nApiClient {
   /**
    * Get the n8n version, fetching it if not already cached.
    * Uses promise-based locking to prevent concurrent requests.
+   *
+   * **Returns null against every n8n from 1.119.0 onward**, which in practice means every
+   * instance: the version is only reachable through an internal editor route that answers
+   * Public API clients without it, and the Public API exposes no version of its own. See
+   * {@link fetchN8nVersion}.
+   *
+   * So do not gate behaviour on this. Null means "unknown", never "old", and a feature gated on
+   * a minimum version here is a feature that is off for everyone. Probe the instance instead -
+   * `groupSupport` and {@link postPublishRoute} read what the API actually answers - and keep the
+   * unprobed path the one that works on every version.
    */
   async getVersion(): Promise<N8nVersionInfo | null> {
     // If we already have version info, return it
@@ -528,7 +709,7 @@ export class N8nApiClient {
       const response = await this.client.put(`/workflows/${safeId}`, body);
       return response.data;
     } catch (putError: any) {
-      if (putError.response?.status !== 405) throw putError;
+      if (failureStatus(putError) !== 405) throw putError;
       logger.debug('PUT method not supported, falling back to PATCH');
       const response = await this.client.patch(`/workflows/${safeId}`, body);
       return response.data;
@@ -615,8 +796,9 @@ export class N8nApiClient {
           versionInfo
         );
       } else {
-        logger.warn('Could not determine n8n version, sending all known settings properties');
-        // Without version info, we send all known properties (might fail on old n8n)
+        // The normal case since n8n 1.119.0 (see getVersion). Settings are forwarded untouched;
+        // n8n rejects anything it does not accept, which reads better than dropping it silently.
+        logger.debug('n8n version unknown, forwarding workflow settings unfiltered');
       }
 
       const safeId = encodeApiPathSegment(id, 'workflowId');
@@ -654,22 +836,120 @@ export class N8nApiClient {
     }
   }
 
-  async activateWorkflow(id: string): Promise<Workflow> {
-    try {
-      const response = await this.client.post(`/workflows/${encodeApiPathSegment(id, 'workflowId')}/activate`, {});
+  /**
+   * POST the publish-family route a workflow needs, preferring the name the target n8n uses.
+   *
+   * n8n 2.33 renamed `/activate` to `/publish` and `/deactivate` to `/unpublish`, and marked the
+   * old pair deprecated (2026-07-23). The deprecated routes are literal aliases of the new
+   * handlers — same service call, same result — so this is a rename, not a behaviour change.
+   * `/publish` additionally accepts an optional body naming a version to publish; we send none,
+   * which keeps the semantics identical to `/activate`.
+   *
+   * The new route is used only when the instance is *confirmed* to have it. The legacy pair
+   * works on every supported version - on 2.33+ they are the same handler - so an unconfirmed
+   * instance is served by the legacy route rather than probed, which would waste a request per
+   * call on every pre-2.33 instance.
+   *
+   * Confirmation comes from the instance, not from a version number, because version detection
+   * returns null on every n8n from 1.119.0 (see {@link getVersion}). Two things confirm it, both
+   * one-way: a `Deprecation` header on a legacy response, which only an n8n that has the
+   * replacement sends, and a fallback to the modern route that succeeds. A version reading is
+   * still honoured when one is somehow available.
+   *
+   * The fallback runs in both directions on a 404, 405 or 410. A router with no route may report
+   * either, depending on whether it matches the path prefix before the method; n8n answers 405
+   * here, so keying on 404 alone left the fallback dead in practice. Symmetry matters because
+   * the legacy routes are deprecated (2026-07-23, no sunset announced): when n8n eventually
+   * removes them, an instance we could not version-detect would otherwise lose activation
+   * entirely, rather than moving to the route that replaced it.
+   *
+   * The cost is one extra request on a workflow id that does not exist, since n8n answers 404
+   * for an absent workflow and an absent route alike. Both attempts end in the same error. That
+   * also costs the confirmation: the response interceptor keeps a failure's status but not its
+   * headers, so only a legacy call that succeeds can carry the deprecation signal.
+   */
+  private async postPublishRoute(
+    id: string,
+    modernPath: 'publish' | 'unpublish',
+    legacyPath: 'activate' | 'deactivate'
+  ): Promise<Workflow> {
+    const safeId = encodeApiPathSegment(id, 'workflowId');
+    let preferModern = this.modernPublishRoute;
+    if (!preferModern) {
+      // Only read while the routes are unconfirmed: once they are, no version could change the
+      // choice, and asking costs a request every time the version cache has expired.
+      const version = await this.getVersion();
+      preferModern = version !== null && versionAtLeast(version, 2, 33, 0);
+    }
+    const [primaryPath, fallbackPath] = preferModern
+      ? [modernPath, legacyPath]
+      : [legacyPath, modernPath];
+    const post = async (path: string): Promise<Workflow> => {
+      const response = await this.client.post(`/workflows/${safeId}/${path}`, {});
+      if (path === legacyPath && hasDeprecationHeader(response.headers)) {
+        this.confirmModernPublishRoute(`/${legacyPath} answered with a Deprecation header`);
+      }
       return response.data;
-    } catch (error) {
-      throw handleN8nApiError(error);
+    };
+    let status: number | undefined;
+
+    let primaryError: unknown;
+    try {
+      return await post(primaryPath);
+    } catch (error: any) {
+      status = failureStatus(error);
+      if (!ROUTE_ABSENT_STATUSES.has(status as number)) {
+        throw handleN8nApiError(error);
+      }
+      primaryError = error;
+    }
+
+    // n8n answers 404 for a workflow that does not exist as well as for a route it does not
+    // have, so this retry also fires on a bad workflow ID. That costs one request and ends in
+    // the same error, which is why the status is logged as a route probe, not a failure.
+    logger.debug(
+      `POST /workflows/{id}/${primaryPath} returned ${status} - retrying /${fallbackPath} ` +
+        '(this n8n does not serve that route, or the workflow does not exist)'
+    );
+    try {
+      const workflow = await post(fallbackPath);
+      if (fallbackPath === modernPath) {
+        this.confirmModernPublishRoute(`/${legacyPath} is absent and /${modernPath} answered`);
+      }
+      return workflow;
+    } catch (fallbackError) {
+      // When the fallback fails the same way, neither route exists and the first attempt is the
+      // more faithful account - a missing workflow should read as a missing workflow rather than
+      // as confusion about the second route. A substantive failure (say a 400 naming a missing
+      // trigger) is the useful one, so that is surfaced instead.
+      const fallbackStatus = failureStatus(fallbackError);
+      throw handleN8nApiError(
+        ROUTE_ABSENT_STATUSES.has(fallbackStatus as number) ? primaryError : fallbackError
+      );
     }
   }
 
+  /**
+   * Latch that this instance serves the modern publish routes, so later calls go there first.
+   * Only ever called from evidence that the routes exist; nothing clears it.
+   *
+   * Nothing clears it because no response proves the routes are absent - a 404 is equally a
+   * missing workflow. If some intermediary ever produced the evidence spuriously (a proxy that
+   * adds a Deprecation header while blocking `/publish`), the cost is one wasted request per
+   * call, not a failure: the fallback still lands on the legacy route.
+   */
+  private confirmModernPublishRoute(evidence: string): void {
+    if (this.modernPublishRoute) return;
+    this.modernPublishRoute = true;
+    logger.debug(`Using the publish/unpublish routes for this instance: ${evidence}`);
+  }
+
+  async activateWorkflow(id: string): Promise<Workflow> {
+    return this.postPublishRoute(id, 'publish', 'activate');
+  }
+
   async deactivateWorkflow(id: string): Promise<Workflow> {
-    try {
-      const response = await this.client.post(`/workflows/${encodeApiPathSegment(id, 'workflowId')}/deactivate`, {});
-      return response.data;
-    } catch (error) {
-      throw handleN8nApiError(error);
-    }
+    return this.postPublishRoute(id, 'unpublish', 'deactivate');
   }
 
   /**
@@ -881,7 +1161,9 @@ export class N8nApiClient {
 
       // SECURITY (GHSA-cmrh-wvq6-wm9r): pin transport to validated IP.
       const pinned = validation.address && validation.family
-        ? SSRFProtection.createPinnedAgents(validation.address, validation.family)
+        ? SSRFProtection.createPinnedAgents(
+            validation.addresses ?? [{ address: validation.address, family: validation.family }]
+          )
         : undefined;
 
       // Create a new axios instance for webhook requests to avoid API interceptors
