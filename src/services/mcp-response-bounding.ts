@@ -483,6 +483,37 @@ function projectSelection(
   return { value: projected, resolved };
 }
 
+/** Remove one redundant collection prefix only when every field uses it. */
+function relativeFieldsForInferredArray(fields: string[], childPath: string): string[] | undefined {
+  const prefix = `${childPath}/`;
+  const normalized: string[] = [];
+  for (const field of fields) {
+    const candidate = fieldPointer(field);
+    if (!candidate.startsWith(prefix)) return undefined;
+    const relative = candidate.slice(childPath.length);
+    if (relative === '' || relative === '/') return undefined;
+    normalized.push(relative);
+  }
+  return normalized;
+}
+
+/** Keep caller-visible projection keys stable after a safe pointer rewrite. */
+function restoreProjectedFieldLabels(
+  projected: unknown[],
+  requestedFields: string[],
+  effectiveFields: string[],
+): Record<string, unknown>[] {
+  return projected.map(item => {
+    const source = item as Record<string, unknown>;
+    const restored: Record<string, unknown> = {};
+    requestedFields.forEach((requested, index) => {
+      const effective = effectiveFields[index];
+      if (Object.prototype.hasOwnProperty.call(source, effective)) restored[requested] = source[effective];
+    });
+    return restored;
+  });
+}
+
 function contains(actual: unknown, expected: unknown): boolean {
   if (typeof actual === 'string') return typeof expected === 'string' && actual.includes(expected);
   if (Array.isArray(actual)) return actual.some(value => isDeepStrictEqual(value, expected));
@@ -1380,6 +1411,7 @@ export function queryResponseArtifact(
   }
 
   let fieldsResolved: Record<string, number> | undefined;
+  let fieldNormalizationWarning: string | undefined;
   if (fields?.length) {
     let projected: ReturnType<typeof projectSelection>;
     try {
@@ -1395,7 +1427,26 @@ export function queryResponseArtifact(
       }
       inferredResponsePath = joinResponsePath(responsePath, inferred.path);
       selected = inferred.value;
-      projected = projectSelection(selected, fields);
+      try {
+        projected = projectSelection(selected, fields);
+      } catch (inferredError) {
+        const normalizedFields = inferredError instanceof Error
+          && inferredError.message.includes('fields matched no properties')
+          ? relativeFieldsForInferredArray(fields, inferred.path)
+          : undefined;
+        if (!normalizedFields) throw inferredError;
+        const normalized = projectSelection(selected, normalizedFields);
+        projected = {
+          value: restoreProjectedFieldLabels(normalized.value as unknown[], fields, normalizedFields),
+          resolved: Object.fromEntries(fields.map((field, index) => [
+            field,
+            normalized.resolved[normalizedFields[index]],
+          ])),
+        };
+        fieldNormalizationWarning =
+          `Inferred collection ${inferredResponsePath} and interpreted fields relative to each item: ` +
+          `${normalizedFields.join(', ')}.`;
+      }
     }
     selected = projected.value;
     fieldsResolved = projected.resolved;
@@ -1440,6 +1491,7 @@ export function queryResponseArtifact(
 
   const selection = classify(selected);
   const unitWarnings: string[] = [];
+  if (fieldNormalizationWarning) unitWarnings.push(fieldNormalizationWarning);
   if (fieldsResolved && Object.values(fieldsResolved).some(count => count > 0)) {
     const missing = Object.entries(fieldsResolved).filter(([, count]) => count === 0).map(([field]) => field);
     if (missing.length) {
