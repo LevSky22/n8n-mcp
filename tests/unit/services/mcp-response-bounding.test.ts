@@ -397,6 +397,47 @@ describe('MCP response bounding', () => {
     expect(emptyProjection.responseMeta.fieldsResolved).toEqual({ id: 0 });
   });
 
+  it('normalizes a redundant collection prefix only after unambiguous array inference', () => {
+    const artifact = persistResponseArtifact({
+      tags: [
+        { name: 'retainer', tag_fg: '#ffffff', tag_bg: '#000000' },
+        { name: 'complete', tag_fg: '#111111', tag_bg: '#eeeeee' },
+      ],
+    }, 'tenant-a');
+
+    const projected = queryResponseArtifact(
+      artifact.id,
+      '',
+      ['/tags/name', '/tags/tag_fg', '/tags/tag_bg'],
+      undefined,
+      20,
+      undefined,
+      'tenant-a',
+    ) as any;
+
+    expect(projected.response).toEqual([
+      { '/tags/name': 'retainer', '/tags/tag_fg': '#ffffff', '/tags/tag_bg': '#000000' },
+      { '/tags/name': 'complete', '/tags/tag_fg': '#111111', '/tags/tag_bg': '#eeeeee' },
+    ]);
+    expect(projected.responseMeta.inferredResponsePath).toBe('/tags');
+    expect(projected.responseMeta.fieldsResolved).toEqual({
+      '/tags/name': 2,
+      '/tags/tag_fg': 2,
+      '/tags/tag_bg': 2,
+    });
+    expect(projected.responseMeta.warning).toContain('interpreted fields relative to each item');
+
+    expect(() => queryResponseArtifact(
+      artifact.id,
+      '',
+      ['/tags/name', '/other/value'],
+      undefined,
+      20,
+      undefined,
+      'tenant-a',
+    )).toThrow('matched no properties');
+  });
+
   it('does not infer a child when a projected root field resolves', () => {
     const artifact = persistResponseArtifact({ id: 'root', rows: [{ id: 'child' }] }, 'tenant-a');
     const projected = queryResponseArtifact(
