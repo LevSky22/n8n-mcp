@@ -22,8 +22,9 @@ RUN --mount=type=cache,target=/root/.npm \
         @modelcontextprotocol/sdk@1.30.0 @modelcontextprotocol/node@^2.0.0 \
         @modelcontextprotocol/server@^2.0.0 @modelcontextprotocol/server-legacy@^2.0.0 \
         dotenv@^16.5.0 express@^5.1.0 axios@^1.18.1 \
-        n8n-workflow@2.35.2 uuid@^11.1.1 @types/uuid@^10.0.0 \
-        openai@^4.77.0 zod@3.25.76 lru-cache@^11.2.1 @supabase/supabase-js@^2.57.4
+        n8n-workflow@2.36.3 uuid@^11.1.1 @types/uuid@^10.0.0 \
+        openai@^4.77.0 zod@3.25.76 lru-cache@^11.2.1 @supabase/supabase-js@^2.57.4 \
+        undici@^6.28.0
 
 # Copy source and build
 COPY src ./src

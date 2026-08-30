@@ -1,7 +1,7 @@
 import { ToolDocumentation } from './types';
 
 // Import all tool documentations
-import { searchNodesDoc } from './discovery';
+import { searchNodesDoc, n8nExploreNodeResourcesDoc } from './discovery';
 import { getNodeDoc } from './configuration';
 import { validateNodeDoc, validateWorkflowDoc } from './validation';
 import { getTemplateDoc, searchTemplatesDoc } from './templates';
@@ -28,7 +28,9 @@ import {
   n8nDeployTemplateDoc,
   n8nManageDatatableDoc,
   n8nManageCredentialsDoc,
-  n8nManageFoldersDoc
+  n8nManageFoldersDoc,
+  n8nManageAgentsDoc,
+  n8nListCatalogDoc
 } from './workflow_management';
 
 // Combine all tool documentations into a single object
@@ -47,6 +49,7 @@ export const toolsDocumentation: Record<string, ToolDocumentation> = {
 
   // Discovery tools
   search_nodes: searchNodesDoc,
+  n8n_explore_node_resources: n8nExploreNodeResourcesDoc,
 
   // Configuration tools
   get_node: getNodeDoc,
@@ -75,7 +78,9 @@ export const toolsDocumentation: Record<string, ToolDocumentation> = {
   n8n_deploy_template: n8nDeployTemplateDoc,
   n8n_manage_datatable: n8nManageDatatableDoc,
   n8n_manage_credentials: n8nManageCredentialsDoc,
-  n8n_manage_folders: n8nManageFoldersDoc
+  n8n_manage_folders: n8nManageFoldersDoc,
+  n8n_manage_agents: n8nManageAgentsDoc,
+  n8n_list_catalog: n8nListCatalogDoc
 };
 
 // Re-export types

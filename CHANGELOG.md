@@ -7,9 +7,95 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.76.0] - 2026-08-28
+
 ### Added
 
-- **Dual-era stateless MCP transport.** The HTTP MCP endpoint uses the split TypeScript SDK v2 server packages and serves both initialize-era clients and MCP 2026-07-28 clients from the same request-scoped handler. Existing stateless tenant isolation is preserved, while modern clients can use discovery without a separate endpoint. The embedded outgoing MCP client remains on SDK v1 for its WebSocket transport, which SDK v2 no longer provides.
+- **`n8n_test_workflow` can run workflows that have no webhook, form or chat trigger**, through n8n's instance-level MCP server (`N8N_MCP_ACCESS_TOKEN`, n8n 2.34+). The new `method` parameter selects the path: `auto` (default) and `trigger` keep the existing HTTP behaviour, `prepare` lists the nodes that need pinned data, `pinned` runs the workflow with a `pinData` map you build from that list, and `direct` starts a run with optional inputs. Supporting parameters: `pinData`, `triggerNodeName`, `executionMode` (`manual` default, `production` only when passed), `timeoutMs` and `exposeToMcp`. Successful and routed responses state `method` and `backend`.
+- **`n8n_workflow_versions` can read n8n's own version history**, with `source: 'native'` (the same list the n8n UI shows, including edits made by people) alongside the existing `source: 'local'` snapshots that n8n-mcp takes before it changes a workflow. Native supports `list`, `get`, `rollback` and the new `diff` mode; `delete` and `prune` stay local-only. New parameters: `source`, `toVersionId`, `offset` (native list) and `exposeToMcp`. `diff` also works on local snapshots.
+- **`n8n_manage_datatable` can change an existing table's columns**: `addColumn`, `deleteColumn` and `renameColumn`, routed to n8n's MCP server because the public API cannot alter columns after a table is created. The owning `projectId` is resolved automatically when exactly one project is accessible; otherwise the call returns `PROJECT_REQUIRED` and lists the candidates.
+- **An `exposeToMcp` consent flow for the routed workflow operations.** n8n refuses MCP calls for a workflow whose "Available in MCP" setting is off; that refusal is reported as `WORKFLOW_NOT_EXPOSED` with a hint. Re-running with `exposeToMcp: true` turns the setting on, retries once, and marks the response `exposedToMcp: true`. `DISABLED_TOOL_OPERATIONS` accepts a virtual `expose` operation (`n8n_test_workflow:expose`, `n8n_workflow_versions:expose`) to block that write while leaving the read paths available. See `docs/OFFICIAL_MCP_SETUP.md` sections 1 and 4.
+- No new tools: the three operations above extend existing ones, so the tool count is unchanged (28), and `n8n_health_check` is unchanged.
+
+### Changed
+
+- `n8n_test_workflow` is annotated as destructive (`destructiveHint: true`) and is now eligible for `DISABLED_TOOL_OPERATIONS` filtering on its `method` parameter (`auto`, `trigger`, `pinned`, `direct` are the write methods; `prepare` is the read path). A call that omits `method` is checked as `auto`, so a rule naming `auto` cannot be sidestepped by leaving the parameter out.
+- `n8n_manage_datatable` now honours `DISABLED_TOOL_OPERATIONS` on its `action` parameter. Entries naming it were previously accepted and had no effect; a deployment that already lists it should check that the operations it names are the ones it wants blocked (`createtable`, `updatetable`, `deletetable`, `insertrows`, `updaterows`, `upsertrows`, `deleterows`, `addcolumn`, `deletecolumn`, `renamecolumn`).
+- Results from n8n's MCP server are no longer validated against the `outputSchema` that server advertises. n8n declares schemas that describe only the success shape and then answers refusals with a different payload, so the check turned a refusal the caller needs to read into an opaque transport error. Results were already treated as untrusted data and size-capped regardless of the schema.
+- `versionId` and `toVersionId` carry no JSON-Schema `type`, because local snapshot ids are numbers and native version ids are strings; both forms are accepted.
+- A local `diff` reports added, removed and modified nodes as node **IDs** (`data.format: "n8n-mcp"`). A native diff returns n8n's own payload (`data.format: "n8n"`) with field-level before/after values.
+- A result from n8n's MCP server whose root carries `success: false`, and an `execute_workflow` result with `status: 'error'`, are reported as failures (`OFFICIAL_MCP_ERROR`) instead of being passed through as successes. This applies to the tools added in 2.75.0 as well.
+- `OFFICIAL_MCP_TOOL_UNAVAILABLE` now names the n8n version that first shipped the missing tool, so the message says what to upgrade to.
+
+### Fixed
+
+- On a per-request context that names an instance (`x-n8n-url`) with `x-n8n-mcp-token` but no `x-n8n-key`, no path falls back to the operator's own Public API instance any more: `n8n_test_workflow` refuses every method except a plain `prepare` with `NOT_CONFIGURED` naming the missing `x-n8n-key`, and the project lookup behind `n8n_list_catalog` and the data-table column actions uses the MCP server's own `search_projects` instead of the environment client. Only single-tenant header-driven deployments could hit this — multi-tenant mode already requires both headers.
+- `method: 'direct'` with a `triggerNodeName` that matches no node in the workflow now returns `INVALID_ARGS` locally instead of forwarding the unknown name to n8n's MCP server.
+
+### Security
+
+- **`method: 'auto'` never runs anything through n8n's MCP server.** Without a webhook, form or chat trigger it reports that the workflow cannot be triggered and names `method: 'prepare'` / `'pinned'` / `'direct'` — the routed methods are only ever reached when they are asked for by name.
+- **`executionMode: 'production'` is only used when it is passed explicitly**; `method: 'direct'` runs as a manual execution otherwise.
+- **n8n-mcp never changes "Available in MCP" on its own.** The consent flow turns it on only when `exposeToMcp: true` is passed, and never turns it off. Either value can still be written deliberately by the caller — `n8n_update_partial_workflow`'s `updateSettings` operation, a create, or a full update carrying an explicit `availableInMCP` — as can the toggle in the n8n UI.
+- The consent write is an ordinary workflow update through the public API — read the workflow, merge the one setting, write the whole workflow back — with the same overwrite window and the same side effects as every other n8n-mcp update (n8n may normalise webhook ids, and inherited canvas groups may be repaired or dropped; those adjustments come back as `warnings`).
+- The consent write is refused with `OPERATION_DISABLED` when server policy disables `n8n_update_partial_workflow` or the calling tool's `expose` operation, so a read-only deployment cannot be talked into writing the setting.
+
+## [2.75.1] - 2026-08-28
+
+### Fixed
+
+- `probeOfficialMcp` (and the `OfficialMcpCapabilities` / `OfficialMcpErrorCode` types) are now re-exported from the package root. They were exported from `mcp-engine` only, but the package's `exports` map publishes just `.`, so `import { probeOfficialMcp } from 'n8n-mcp'` failed with `ERR_PACKAGE_PATH_NOT_EXPORTED` and embedders had to resolve the compiled file by path.
+
+## [2.75.0] - 2026-08-28
+
+### Added
+
+- **Three tools that talk to n8n's instance-level MCP server**, using a new optional `N8N_MCP_ACCESS_TOKEN` setting (separate from `N8N_API_KEY`, derived endpoint from `N8N_API_URL`): `n8n_manage_agents` manages n8n Agents (the persisted assistant artifact — model, instructions, tools, skills, tasks, memory, channels) and `n8n_explore_node_resources` resolves a node's dynamic dropdown (`loadOptions`) or resource-locator search (`listSearch`) values (Slack channels, Google Sheets tabs, model lists) using a real credential — both require the token and return `NOT_CONFIGURED` without it. `n8n_list_catalog` lists instance-level projects or tags and works without the token; when it's configured, `n8n_list_catalog` additionally falls back to n8n's MCP server for team projects on instances where the Public API's licence gate refuses them. See `docs/OFFICIAL_MCP_SETUP.md` for the setup walkthrough.
+- **`n8n_health_check` reports an `officialMcp` block** (`configured`, `reachable`, `toolCount`, `agentTools`, and an error code/hint when something's wrong) so you can check the connection to n8n's MCP server without calling one of the tools above. `mode: "diagnostic"` forces a live probe instead of returning the cached result.
+- **`get_node`'s `standard` detail level now flags dynamic properties** with a `dynamicOptions` field (`methodName`, `methodType`, `dependsOn`) on any property backed by a `loadOptions` method or a resource-locator `listSearch` mode, so a config step can tell which fields need `n8n_explore_node_resources` before a value can be filled in confidently.
+- `N8N_MCP_ACCESS_TOKEN` environment variable / instance-context field, documented alongside `N8N_API_URL` and `N8N_API_KEY`. In HTTP mode it can also travel per request in the `x-n8n-mcp-token` header, which must be sent together with `x-n8n-url` and (in multi-tenant mode) `x-n8n-key`; such a request is authoritative and never falls back to the server's own environment variables. The header is redacted from logs like the other two.
+
+### Changed
+
+- `undici` moves from a transitive dependency to a direct one — it backs the SSRF-pinned fetch used by the new MCP client transport.
+- A call to n8n's MCP server is retried after a connection-level failure only when it is a read (`reference`, `search`, `get`, `versions`, `validate`, `discover_assets`, `verify_mcp_server`, plus `n8n_explore_node_resources` and the project listing). A dead socket does not prove the request never arrived, so a `create`, `mutate`, `call`, `publish`, `unpublish`, `revert`, `delete` or `update_integration` is surfaced instead of being sent twice.
+- An unreachable result from the capability probe is cached for 30 seconds instead of the ten minutes a success gets, so a corrected token or a restarted instance is picked up on the next call rather than at the end of the TTL.
+- `DISABLED_TOOL_OPERATIONS` now treats every write action of `n8n_manage_agents` as destructive — `create`, `mutate` and `call` join `publish`, `unpublish`, `revert`, `delete` and `update_integration`, since a create persists a draft and a call runs the agent's real tools. Deployments that block the destructive actions by name should update their list.
+- The error code for n8n's `agent_tool_error` is `AGENT_TOOL_ERROR`, not `AGENT_TOOL_COMPILE_ERROR`: n8n reports it for an unknown `agentId` as well as for a custom tool that fails to compile, and the hint now names both.
+- `action: "reference"` resolves its tool against the instance's tool list like every other action, so an instance without the agents module answers `OFFICIAL_MCP_TOOL_UNAVAILABLE` instead of a transport error, and a failed reference lookup is no longer cached as if it were the guide.
+
+### Security
+
+- The endpoint for n8n's instance-level MCP server is derived from the already SSRF-validated `N8N_API_URL`, not taken from user input.
+- The MCP client transport pins DNS resolution to the addresses validated at connection time, the same protection already applied to webhook and API calls.
+- **The pinned fetch does not follow redirects.** Address pinning constrains the URL that was validated; following a 3xx would let the server choose the next request's host, port and path, and that URL would be re-resolved through the same pinned lookup — reaching another port on a validated address, or a URL that never went through validation. A redirect now surfaces as a plain transport error saying redirects are not followed.
+- The MCP access token is never written to logs, in either its environment or its header form.
+- **A protocol error from n8n's MCP server is reported with a fixed message naming only the numeric JSON-RPC code; the server's own error text is never copied into the response.** That text is attacker-controlled — a buggy instance or an intermediary proxy can echo the request, including the `Authorization` header, into it.
+- **A failed call is retried only after a connection-level failure** — no HTTP status and no JSON-RPC reply — and only for a call declared idempotent. An HTTP status or a protocol error proves the request reached n8n on a healthy connection, so it is surfaced without re-sending it and without discarding the shared transport (which would abort other calls in flight on it).
+- **A tool result's `structuredContent` is size-capped like its text.** It is a second, independent payload; capping only the text let an oversized structured result through untouched. Over the cap it is dropped and the result is marked `truncated`.
+- A token sent in `x-n8n-mcp-token` without `x-n8n-url` is rejected as an incomplete header set: the MCP endpoint is derived from the URL, so the token alone cannot address the caller's instance, and the request would otherwise resolve to the server's own `N8N_MCP_ACCESS_TOKEN`.
+
+### Fixed
+
+- **`ESSENTIAL_PROPERTIES` for the Slack node named a `channel` field that doesn't exist** — the node's actual property is `channelId` (a resource-locator, not a plain string), and its blocks field is `blocksUi`, not `blocks`. `get_node`'s `standard` detail level therefore never surfaced the channel picker or the blocks builder as essential fields for Slack. Both names are corrected.
+
+## [2.74.1] - 2026-08-27
+
+### Fixed
+
+- **`n8n_create_workflow` silently dropped workflow settings outside its own list** (#1026). The create input schema was a closed object with eight settings keys, so `availableInMCP`, `callerPolicy`, `callerIds`, `timeSavedPerExecution`, `customTelemetryTags`, `redactionPolicy` and `timeSavedMode` were stripped before the payload reached the API client. A workflow created with `settings.availableInMCP: true` therefore never appeared in n8n's instance-level MCP server, while the same key set through `updateSettings` worked. The typed keys are still validated; every other key is now forwarded, as on the update path; the create cleaner still drops the derived properties n8n ignores on write. The tool schema and documentation now mention `availableInMCP`.
+
+## [2.74.0] - 2026-08-27
+
+### Changed
+
+- **n8n dependencies updated to 2.36.x** — `n8n-nodes-base` 2.35.3 → 2.36.4, `n8n-core` 2.35.3 → 2.36.5, `n8n-workflow` 2.35.2 → 2.36.3, `@n8n/n8n-nodes-langchain` 2.35.3 → 2.36.4. The node database is rebuilt against them: 2,616 nodes (832 core, unchanged, plus 1,784 community nodes, up from 1,709). No core nodes were added or removed; 16 core node schemas changed, 5 of them with a new typeVersion.
+- Node-level changes users will see through this server: the Schedule Trigger moves to typeVersion 1.4 and gains an "If Execution Is Missed" policy (`misfirePolicy`: skip, coalesce, or coalesce per owner) with a per-node `misfireGraceSeconds`, so catch-up runs after downtime can be collapsed instead of firing once per missed slot; the MCP Server Trigger moves to typeVersion 2.1 with a server `instructions` field and an `includeUserInOutput` toggle; the Discord node's member resource gains ban, unban, kick and timeout operations with structured moderation reasons; the OpenRouter Chat Model gains provider routing options (`order`, `allowFallbacks`, `requireParameters`, `dataCollection`, `zdr`, `only`, `ignore`, `sort`); the MiniMax nodes move to typeVersion 1.1 with the M3 chat model and the H3 video model (duration and resolution controls) as new defaults; and the Jira node adds a user-management scope notice. `nodes-base.confluence`, still shipped hidden by n8n, now carries a real schema — a `page` resource with `create` and `get` (optionally with the full sub-tree) — so `get_node` no longer returns it empty.
+- Community nodes refreshed: 1,491 verified nodes fetched from the n8n registry (1,495 verified rows in the database, 4 of them retained from earlier syncs) plus 140 node rows from 67 npm packages, with 3 rows dropped for packages that no longer declare them. READMEs were refreshed for 1,771 of 1,784 community nodes and 72 AI documentation summaries generated, bringing summary coverage to 1,771 of 1,784.
+
+### Fixed
+
+- **Docker image build broke on `isolated-vm`.** `n8n-workflow` 2.36.3 pulls in `@n8n/expression-runtime` 0.27.1, which moves its `isolated-vm` dependency from 6.x to 7.x. Version 7 requires Node 24 and ships no prebuilt binary for Node 22, so on the `node:22-alpine` builder npm fell back to a node-gyp compile and failed for lack of Python. The repo already stubs `isolated-vm` through an npm override (this server never uses it), but the builder stage installs into a scratch `package.json` where that override did not apply. The scratch `package.json` now carries the same override.
 
 ## [2.73.0] - 2026-08-19
 
