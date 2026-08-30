@@ -17,7 +17,7 @@ COPY tsconfig*.json ./
 # `latest` dist-tag, which lags the release n8n ships), and a stale zod fails
 # `npm install` outright, because n8n-workflow declares an exact zod peer dependency.
 RUN --mount=type=cache,target=/root/.npm \
-    echo '{}' > package.json && \
+    echo '{"overrides":{"isolated-vm":"npm:empty-npm-package@1.0.0"}}' > package.json && \
     npm install --no-save typescript@^5.8.3 @types/node@^22.15.30 @types/express@^5.0.3 \
         @modelcontextprotocol/sdk@1.30.0 @modelcontextprotocol/node@^2.0.0 \
         @modelcontextprotocol/server@^2.0.0 @modelcontextprotocol/server-legacy@^2.0.0 \
