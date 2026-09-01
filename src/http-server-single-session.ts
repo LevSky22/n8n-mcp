@@ -19,13 +19,13 @@ import dotenv from 'dotenv';
 import { getStartupBaseUrl, formatEndpointUrls, detectBaseUrl } from './utils/url-detector';
 import { PROJECT_VERSION } from './utils/version';
 import { v4 as uuidv4 } from 'uuid';
-import { createHash } from 'crypto';
+import { createHmac } from 'crypto';
 import {
   negotiateProtocolVersion,
   logProtocolNegotiation,
   STANDARD_PROTOCOL_VERSION
 } from './utils/protocol-version';
-import { InstanceContext, validateInstanceContext } from './types/instance-context';
+import { InstanceContext, pickInstanceContextFields, validateInstanceContext } from './types/instance-context';
 import { SessionState } from './types/session-state';
 import type { AdditionalTool } from './types/additional-tools';
 import { closeSharedDatabase } from './database/shared-database';
@@ -586,7 +586,7 @@ export class SingleSessionHTTPServer {
 
     // Only switch if the context has actually changed
     if (JSON.stringify(existingContext) !== JSON.stringify(newContext)) {
-      logger.info('Multi-tenant shared mode: Updating instance context for session', {
+      logger.info('Multi-tenant mode: Updating instance context for session', {
         sessionId,
         oldInstanceId: existingContext?.instanceId,
         newInstanceId: newContext.instanceId
@@ -836,11 +836,22 @@ export class SingleSessionHTTPServer {
           if (isMultiTenantEnabled && sessionStrategy === 'instance' && instanceContext?.instanceId) {
             // In multi-tenant mode with instance strategy, create session per instance
             // This ensures each tenant gets isolated sessions
-            // Include configuration hash to prevent collisions with different configs
-            const configHash = createHash('sha256')
+            // Include configuration hash to prevent collisions with different configs.
+            // The credentials are part of the config identity (#1045): rotating the n8n
+            // API key or the instance-level MCP access token must change the hash, so a
+            // routing layer comparing hashes stops matching sessions bound to the old
+            // secrets. The secrets only feed the digest — the session ID and logs carry
+            // just its first 8 hex chars, never the values — and the digest is keyed
+            // with the server's auth token, so the truncated fingerprint is not an
+            // offline confirmation oracle for credential guesses (CodeQL
+            // js/insufficient-password-hash). Any legitimate hash-comparing consumer
+            // already holds AUTH_TOKEN, so cross-process comparability is preserved.
+            const configHash = createHmac('sha256', this.authToken ?? '')
               .update(JSON.stringify({
                 url: instanceContext.n8nApiUrl,
-                instanceId: instanceContext.instanceId
+                instanceId: instanceContext.instanceId,
+                n8nApiKey: instanceContext.n8nApiKey,
+                n8nMcpAccessToken: instanceContext.n8nMcpAccessToken
               }))
               .digest('hex')
               .substring(0, 8);
@@ -961,6 +972,30 @@ export class SingleSessionHTTPServer {
           if (isMultiTenantEnabled && sessionStrategy === 'shared' && instanceContext) {
             // Update the context for this session with locking to prevent race conditions
             await this.switchSessionContext(sessionId, instanceContext);
+          } else if (isMultiTenantEnabled && sessionStrategy === 'instance' && instanceContext) {
+            // #1045: in instance strategy the context used to be frozen at creation, so a
+            // rotated n8n API key or MCP access token kept being served until the session
+            // idled out or the client re-initialized. Refresh it — but only from a request
+            // that carries the COMPLETE tenant identity for the SAME instance AND the SAME
+            // n8n URL this session is bound to. A partial context (GHSA-2cf7-hpwf-47h9,
+            // #844) or a different instanceId must never overwrite a session's
+            // credentials, and a changed URL is a different config identity that has to go
+            // through initialize, not mutate an existing session. Fields the request omits
+            // mean "unchanged" — merging over the stored context keeps a request without
+            // e.g. the MCP access token header from clearing a configured token.
+            const storedContext = this.sessionContexts[sessionId];
+            if (
+              instanceContext.n8nApiUrl &&
+              instanceContext.n8nApiKey &&
+              instanceContext.instanceId &&
+              storedContext?.instanceId === instanceContext.instanceId &&
+              storedContext?.n8nApiUrl === instanceContext.n8nApiUrl
+            ) {
+              await this.switchSessionContext(sessionId, {
+                ...storedContext,
+                ...pickInstanceContextFields(instanceContext)
+              });
+            }
           }
 
           // Update session access time
@@ -1948,7 +1983,7 @@ export class SingleSessionHTTPServer {
 
       // Skip sessions without context - these can't be restored meaningfully
       // (Context is required to reconnect to the correct n8n instance)
-      if (!context || !context.n8nApiUrl || !context.n8nApiKey) {
+      if (!context?.n8nApiUrl || !context?.n8nApiKey) {
         logger.debug(`Skipping session ${sessionId} - missing required context`);
         continue;
       }
@@ -1960,12 +1995,16 @@ export class SingleSessionHTTPServer {
           createdAt: metadata.createdAt.toISOString(),
           lastAccess: metadata.lastAccess.toISOString()
         },
+        // Copy every declared InstanceContext field instead of re-listing them here:
+        // a hand-maintained list silently dropped n8nMcpAccessToken (and the
+        // timeout/retry tuning) when those fields were added to InstanceContext
+        // (#1045). The pick keeps embedder-supplied extra properties out of the
+        // persisted plaintext; its key list is compile-time checked for completeness.
         context: {
+          ...pickInstanceContextFields(context),
           n8nApiUrl: context.n8nApiUrl,
           n8nApiKey: context.n8nApiKey,
-          instanceId: context.instanceId || sessionId, // Use sessionId as fallback
-          sessionId: context.sessionId,
-          metadata: context.metadata
+          instanceId: context.instanceId || sessionId // Use sessionId as fallback
         }
       });
     }
@@ -2091,14 +2130,14 @@ export class SingleSessionHTTPServer {
           lastAccess
         };
 
-        // Restore session context
-        this.sessionContexts[sessionState.sessionId] = {
-          n8nApiUrl: sessionState.context.n8nApiUrl,
-          n8nApiKey: sessionState.context.n8nApiKey,
-          instanceId: sessionState.context.instanceId,
-          sessionId: sessionState.context.sessionId,
-          metadata: sessionState.context.metadata
-        };
+        // Restore session context. Copy every declared InstanceContext field — a
+        // hand-maintained field list silently dropped n8nMcpAccessToken for every
+        // restored session (#1045) — while keeping unknown keys from the persisted
+        // JSON out of the live context. The context has already passed
+        // validateInstanceContext plus the credential-completeness guard above.
+        this.sessionContexts[sessionState.sessionId] = pickInstanceContextFields(
+          sessionState.context
+        );
 
         logger.debug(`Restored session ${sessionState.sessionId}`);
         logSecurityEvent('session_restore', {

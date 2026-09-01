@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.77.0] - 2026-08-31
+
+### Added
+
+- **A rejected workflow write now names the keys it sent** ([#1047](https://github.com/czlonkowski/n8n-mcp/issues/1047)). n8n answers an unknown property in a workflow write with `must NOT have additional properties` and never says which property broke it — diagnosing an instance of this class meant diffing n8n source (#248, #466, #1043). When the rejection hits `request/body` or `request/body/settings`, the error now appends the top-level or settings key names that were actually sent, flags settings keys missing from n8n-mcp's known-settings table, and surfaces the property name when n8n's validator params carry one. Key names only, never values.
+
+### Fixed
+
+- **Multi-tenant: rotated credentials no longer keep serving from frozen sessions** ([#1045](https://github.com/czlonkowski/n8n-mcp/issues/1045)). Two defects in the `instance` session strategy. The session's `configHash` — its config identity — covered only the URL and instance ID, so rotating the n8n API key or the instance-level MCP access token produced a byte-identical hash, so a routing layer comparing config identities had no way to tell that a live session was still bound to the pre-rotation secrets. The hash input now includes both credentials, so a rotation changes the session's config identity and the stale session can be detected and re-initialized (an initialize always binds the fresh credentials); only the first 8 characters of the digest — keyed with the server's auth token, so it cannot be used to verify credential guesses offline — ever appear in session IDs and logs, never the values. The server also refreshes a live `instance`-strategy session itself when a request arrives carrying the complete tenant identity (API key plus the same instance ID and same URL the session is bound to) with changed credentials. Fields a request omits stay as stored, and a partial context, a different instance ID, or a different URL never overwrites a session's credentials. Separately, `exportSessionState()`/`restoreSessionState()` rebuilt the context field by field and silently dropped `n8nMcpAccessToken` (and the timeout/retry tuning) for every session persisted across a restart, so `n8n_manage_agents` reported `NOT_CONFIGURED` after every deploy for a token that was still correctly stored. `SessionState['context']` is now derived from `InstanceContext` and export/restore copy the whole context, so every field — current and future — survives the round-trip.
+
+## [2.76.1] - 2026-08-31
+
+### Fixed
+
+- **Workflow updates no longer fail with `settings must NOT have additional properties` against n8n ≥ 2.36.0** ([#1043](https://github.com/czlonkowski/n8n-mcp/issues/1043)). n8n 2.36.0 added `engineType` to the workflow's persisted settings without adding it to the Public API write schema, so `n8n_update_partial_workflow` and `n8n_update_full_workflow` — which read the workflow, apply the change and write it back — echoed the property into a `PUT` the schema rejects. `engineType` is now stripped from every create and update payload, like `binaryMode` and `credentialResolverId` before it. Stripping does not change the setting on the instance: n8n keeps stored settings for keys the request omits.
+
+### Changed
+
+- `npm run check:settings-drift` now also diffs n8n's workflow entity settings (`IWorkflowSettings` from the installed `n8n-workflow` package) against the Public API schema. A property n8n persists but the write schema rejects — the exact shape of #1043, invisible to the schema-only check — now fails the n8n dependency update until it is marked as stripped.
+
 ## [2.76.0] - 2026-08-28
 
 ### Added

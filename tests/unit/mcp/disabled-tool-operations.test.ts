@@ -29,7 +29,10 @@ class TestableN8NMCPServer extends N8NDocumentationMCPServer {
    */
   public async testCallTool(name: string, args: any): Promise<any> {
     const handler = (this as any).server._requestHandlers.get('tools/call');
-    return handler({ method: 'tools/call', params: { name, arguments: args } }, {});
+    return handler(
+      { method: 'tools/call', params: { name, arguments: args } },
+      { mcpReq: { requestState: () => undefined } }
+    );
   }
 }
 
