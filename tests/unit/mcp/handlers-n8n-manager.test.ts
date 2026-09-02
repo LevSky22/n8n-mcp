@@ -29,7 +29,12 @@ vi.mock('@/services/workflow-versioning-service', () => ({
   })),
 }));
 vi.mock('@/config/n8n-api', () => ({
-  getN8nApiConfig: vi.fn()
+  getN8nApiConfig: vi.fn(),
+  // Official MCP is not under test here; keep it "not configured" so
+  // buildOfficialMcpHealth (called by handleHealthCheck/handleDiagnostic)
+  // resolves without a network probe.
+  getOfficialMcpConfig: vi.fn().mockReturnValue(null),
+  getOfficialMcpConfigFromContext: vi.fn().mockReturnValue(null),
 }));
 vi.mock('@/services/n8n-validation', () => ({
   validateWorkflowStructure: vi.fn(),
@@ -306,6 +311,45 @@ describe('handlers-n8n-manager', () => {
       // Should send input as-is to API (n8n expects FULL form: n8n-nodes-base.*)
       expect(mockApiClient.createWorkflow).toHaveBeenCalledWith(input, expect.objectContaining({ onWarning: expect.any(Function) }));
       expect(n8nValidation.validateWorkflowStructure).toHaveBeenCalledWith(input);
+    });
+
+    it('should forward settings keys outside the typed schema, such as availableInMCP (issue #1026)', async () => {
+      // Regression: the create schema was a closed z.object, so Zod stripped every settings key
+      // it did not list before the payload reached the API client. The update path forwards them.
+      const testWorkflow = createTestWorkflow();
+      const input = {
+        name: 'Test Workflow',
+        nodes: testWorkflow.nodes,
+        connections: testWorkflow.connections,
+        settings: {
+          executionOrder: 'v1',
+          availableInMCP: true,
+          callerPolicy: 'workflowsFromSameOwner',
+          timeSavedPerExecution: 5,
+        },
+      };
+
+      mockApiClient.createWorkflow.mockResolvedValue(testWorkflow);
+
+      const result = await handlers.handleCreateWorkflow(input);
+
+      expect(result.success).toBe(true);
+      const sentWorkflow = mockApiClient.createWorkflow.mock.calls[0][0];
+      expect(sentWorkflow.settings).toEqual(input.settings);
+    });
+
+    it('should still reject invalid values for the typed settings keys', async () => {
+      const testWorkflow = createTestWorkflow();
+      const result = await handlers.handleCreateWorkflow({
+        name: 'Test Workflow',
+        nodes: testWorkflow.nodes,
+        connections: testWorkflow.connections,
+        settings: { executionOrder: 'v2', availableInMCP: true },
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.error).toBe('Invalid input');
+      expect(mockApiClient.createWorkflow).not.toHaveBeenCalled();
     });
 
     it('forwards parentFolderId to the create payload (folder placement, n8n 2.32+)', async () => {

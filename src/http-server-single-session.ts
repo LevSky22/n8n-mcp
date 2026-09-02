@@ -18,17 +18,18 @@ import dotenv from 'dotenv';
 import { getStartupBaseUrl, formatEndpointUrls, detectBaseUrl } from './utils/url-detector';
 import { PROJECT_VERSION } from './utils/version';
 import { v4 as uuidv4 } from 'uuid';
-import { createHash } from 'crypto';
+import { createHmac } from 'crypto';
 import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import {
   negotiateProtocolVersion,
   logProtocolNegotiation,
   STANDARD_PROTOCOL_VERSION
 } from './utils/protocol-version';
-import { InstanceContext, validateInstanceContext } from './types/instance-context';
+import { InstanceContext, pickInstanceContextFields, validateInstanceContext } from './types/instance-context';
 import { SessionState } from './types/session-state';
 import type { AdditionalTool } from './types/additional-tools';
 import { closeSharedDatabase } from './database/shared-database';
+import { clearOfficialMcpClientCache } from './mcp/official-mcp-access';
 
 dotenv.config();
 
@@ -39,6 +40,11 @@ const DEFAULT_PROTOCOL_VERSION = STANDARD_PROTOCOL_VERSION;
 interface MultiTenantHeaders {
   'x-n8n-url'?: string;
   'x-n8n-key'?: string;
+  // MCP access token for n8n's instance-level MCP server (n8n_manage_agents,
+  // n8n_explore_node_resources, the team-project fallback in n8n_list_catalog).
+  // Separate secret from x-n8n-key; the env-level equivalent is
+  // N8N_MCP_ACCESS_TOKEN.
+  'x-n8n-mcp-token'?: string;
   'x-instance-id'?: string;
   'x-session-id'?: string;
 }
@@ -111,6 +117,7 @@ function extractMultiTenantHeaders(req: express.Request): MultiTenantHeaders {
   return {
     'x-n8n-url': req.headers['x-n8n-url'] as string | undefined,
     'x-n8n-key': req.headers['x-n8n-key'] as string | undefined,
+    'x-n8n-mcp-token': req.headers['x-n8n-mcp-token'] as string | undefined,
     'x-instance-id': req.headers['x-instance-id'] as string | undefined,
     'x-session-id': req.headers['x-session-id'] as string | undefined,
   };
@@ -530,7 +537,7 @@ export class SingleSessionHTTPServer {
 
     // Only switch if the context has actually changed
     if (JSON.stringify(existingContext) !== JSON.stringify(newContext)) {
-      logger.info('Multi-tenant shared mode: Updating instance context for session', {
+      logger.info('Multi-tenant mode: Updating instance context for session', {
         sessionId,
         oldInstanceId: existingContext?.instanceId,
         newInstanceId: newContext.instanceId
@@ -775,11 +782,22 @@ export class SingleSessionHTTPServer {
           if (isMultiTenantEnabled && sessionStrategy === 'instance' && instanceContext?.instanceId) {
             // In multi-tenant mode with instance strategy, create session per instance
             // This ensures each tenant gets isolated sessions
-            // Include configuration hash to prevent collisions with different configs
-            const configHash = createHash('sha256')
+            // Include configuration hash to prevent collisions with different configs.
+            // The credentials are part of the config identity (#1045): rotating the n8n
+            // API key or the instance-level MCP access token must change the hash, so a
+            // routing layer comparing hashes stops matching sessions bound to the old
+            // secrets. The secrets only feed the digest — the session ID and logs carry
+            // just its first 8 hex chars, never the values — and the digest is keyed
+            // with the server's auth token, so the truncated fingerprint is not an
+            // offline confirmation oracle for credential guesses (CodeQL
+            // js/insufficient-password-hash). Any legitimate hash-comparing consumer
+            // already holds AUTH_TOKEN, so cross-process comparability is preserved.
+            const configHash = createHmac('sha256', this.authToken ?? '')
               .update(JSON.stringify({
                 url: instanceContext.n8nApiUrl,
-                instanceId: instanceContext.instanceId
+                instanceId: instanceContext.instanceId,
+                n8nApiKey: instanceContext.n8nApiKey,
+                n8nMcpAccessToken: instanceContext.n8nMcpAccessToken
               }))
               .digest('hex')
               .substring(0, 8);
@@ -900,6 +918,30 @@ export class SingleSessionHTTPServer {
           if (isMultiTenantEnabled && sessionStrategy === 'shared' && instanceContext) {
             // Update the context for this session with locking to prevent race conditions
             await this.switchSessionContext(sessionId, instanceContext);
+          } else if (isMultiTenantEnabled && sessionStrategy === 'instance' && instanceContext) {
+            // #1045: in instance strategy the context used to be frozen at creation, so a
+            // rotated n8n API key or MCP access token kept being served until the session
+            // idled out or the client re-initialized. Refresh it — but only from a request
+            // that carries the COMPLETE tenant identity for the SAME instance AND the SAME
+            // n8n URL this session is bound to. A partial context (GHSA-2cf7-hpwf-47h9,
+            // #844) or a different instanceId must never overwrite a session's
+            // credentials, and a changed URL is a different config identity that has to go
+            // through initialize, not mutate an existing session. Fields the request omits
+            // mean "unchanged" — merging over the stored context keeps a request without
+            // e.g. the MCP access token header from clearing a configured token.
+            const storedContext = this.sessionContexts[sessionId];
+            if (
+              instanceContext.n8nApiUrl &&
+              instanceContext.n8nApiKey &&
+              instanceContext.instanceId &&
+              storedContext?.instanceId === instanceContext.instanceId &&
+              storedContext?.n8nApiUrl === instanceContext.n8nApiUrl
+            ) {
+              await this.switchSessionContext(sessionId, {
+                ...storedContext,
+                ...pickInstanceContextFields(instanceContext)
+              });
+            }
           }
 
           // Update session access time
@@ -1488,31 +1530,54 @@ export class SingleSessionHTTPServer {
         const headers = extractMultiTenantHeaders(req);
         const hasUrl = headers['x-n8n-url'];
         const hasKey = headers['x-n8n-key'];
+        const hasMcpToken = headers['x-n8n-mcp-token'];
 
         // SECURITY (GHSA-jxx9-px88-pj69, GHSA-2cf7-hpwf-47h9): in multi-tenant
         // mode both tenant headers are required; an incomplete context is
         // rejected.
-        if (process.env.ENABLE_MULTI_TENANT === 'true' && (!hasUrl || !hasKey)) {
-          logger.warn('Multi-tenant request missing tenant headers', {
+        const multiTenantIncomplete = process.env.ENABLE_MULTI_TENANT === 'true' && (!hasUrl || !hasKey);
+        // The same completeness rule applies to x-n8n-mcp-token in any mode:
+        // the MCP endpoint is derived from x-n8n-url, so a token on its own
+        // cannot address the caller's instance. Without this the request
+        // would fall through to N8N_MCP_ACCESS_TOKEN from the environment —
+        // the operator's own token, against the operator's own instance.
+        const mcpTokenWithoutUrl = !!hasMcpToken && !hasUrl;
+        if (multiTenantIncomplete || mcpTokenWithoutUrl) {
+          logger.warn('Request with an incomplete instance header set', {
             hasUrl: !!hasUrl,
-            hasKey: !!hasKey
+            hasKey: !!hasKey,
+            hasMcpToken: !!hasMcpToken,
+            multiTenant: process.env.ENABLE_MULTI_TENANT === 'true'
           });
           res.status(400).json({
             jsonrpc: '2.0',
             error: {
               code: -32602,
-              message: 'Multi-tenant headers required'
+              message: multiTenantIncomplete
+                ? 'Multi-tenant headers required'
+                : 'x-n8n-mcp-token requires x-n8n-url'
             },
             id: req.body?.id ?? null
           });
           return;
         }
 
-        if (hasUrl || hasKey) {
-          // Create context with proper type handling
+        if (hasUrl || hasKey || hasMcpToken) {
+          // Create context with proper type handling. A context carrying
+          // n8nApiUrl plus either credential is authoritative for official-MCP
+          // calls (resolveOfficialMcpConfig never falls back to the
+          // environment for it). getN8nApiClient (the Public API client) is
+          // stricter: without n8nApiKey it falls back to the environment
+          // client in single-tenant mode, so a url+token-only context routes
+          // official calls to the header instance while Public API calls
+          // (the consent write behind exposeToMcp, and the pinned/direct
+          // trigger-detection read) resolve to the operator's own instance —
+          // mcp-exposure.ts refuses those with NOT_CONFIGURED rather than
+          // letting them proceed against the wrong instance.
           const candidate: InstanceContext = {
             n8nApiUrl: hasUrl || undefined,
             n8nApiKey: hasKey || undefined,
+            n8nMcpAccessToken: hasMcpToken || undefined,
             instanceId: headers['x-instance-id'] || undefined,
             sessionId: headers['x-session-id'] || undefined
           };
@@ -1709,6 +1774,14 @@ export class SingleSessionHTTPServer {
       logger.debug('Telemetry flush during shutdown failed:', error);
     }
 
+    // Close every cached n8n MCP client, so their transports and pinned
+    // undici dispatchers do not keep the process alive.
+    try {
+      await clearOfficialMcpClientCache();
+    } catch (error) {
+      logger.warn('Error closing n8n MCP clients:', error);
+    }
+
     // Close the shared database connection (only during process shutdown)
     // This must happen after all sessions are closed
     try {
@@ -1792,7 +1865,7 @@ export class SingleSessionHTTPServer {
 
       // Skip sessions without context - these can't be restored meaningfully
       // (Context is required to reconnect to the correct n8n instance)
-      if (!context || !context.n8nApiUrl || !context.n8nApiKey) {
+      if (!context?.n8nApiUrl || !context?.n8nApiKey) {
         logger.debug(`Skipping session ${sessionId} - missing required context`);
         continue;
       }
@@ -1804,12 +1877,16 @@ export class SingleSessionHTTPServer {
           createdAt: metadata.createdAt.toISOString(),
           lastAccess: metadata.lastAccess.toISOString()
         },
+        // Copy every declared InstanceContext field instead of re-listing them here:
+        // a hand-maintained list silently dropped n8nMcpAccessToken (and the
+        // timeout/retry tuning) when those fields were added to InstanceContext
+        // (#1045). The pick keeps embedder-supplied extra properties out of the
+        // persisted plaintext; its key list is compile-time checked for completeness.
         context: {
+          ...pickInstanceContextFields(context),
           n8nApiUrl: context.n8nApiUrl,
           n8nApiKey: context.n8nApiKey,
-          instanceId: context.instanceId || sessionId, // Use sessionId as fallback
-          sessionId: context.sessionId,
-          metadata: context.metadata
+          instanceId: context.instanceId || sessionId // Use sessionId as fallback
         }
       });
     }
@@ -1935,14 +2012,14 @@ export class SingleSessionHTTPServer {
           lastAccess
         };
 
-        // Restore session context
-        this.sessionContexts[sessionState.sessionId] = {
-          n8nApiUrl: sessionState.context.n8nApiUrl,
-          n8nApiKey: sessionState.context.n8nApiKey,
-          instanceId: sessionState.context.instanceId,
-          sessionId: sessionState.context.sessionId,
-          metadata: sessionState.context.metadata
-        };
+        // Restore session context. Copy every declared InstanceContext field — a
+        // hand-maintained field list silently dropped n8nMcpAccessToken for every
+        // restored session (#1045) — while keeping unknown keys from the persisted
+        // JSON out of the live context. The context has already passed
+        // validateInstanceContext plus the credential-completeness guard above.
+        this.sessionContexts[sessionState.sessionId] = pickInstanceContextFields(
+          sessionState.context
+        );
 
         logger.debug(`Restored session ${sessionState.sessionId}`);
         logSecurityEvent('session_restore', {

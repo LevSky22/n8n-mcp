@@ -44,8 +44,9 @@ import {
   FolderListParams,
   FolderListResponse,
   ProjectSummary,
+  Project,
 } from '../types/n8n-api';
-import { handleN8nApiError, logN8nError, N8nApiError, N8nValidationError } from '../utils/n8n-errors';
+import { enrichUnknownPropertyError, handleN8nApiError, logN8nError, N8nApiError, N8nValidationError } from '../utils/n8n-errors';
 import { encodeApiPathSegment } from '../utils/validation-schemas';
 import { cleanWorkflowForCreate, cleanWorkflowForUpdate } from './n8n-validation';
 import {
@@ -560,6 +561,48 @@ export class N8nApiClient {
   }
 
   /**
+   * Send a workflow write. This is the one seam where the outgoing body is still in scope when
+   * n8n rejects it, so an unlocatable "must NOT have additional properties" 400 is enriched here
+   * with the keys that were sent (#1047) before it propagates to the handlers.
+   *
+   * The group ladder can retry with a different body than the caller's payload (groups dropped,
+   * or the field omitted when the instance is known not to support it), so each failed attempt
+   * records the body it actually sent and the enrichment reports that one — never a key the
+   * failing request did not carry. handleN8nApiError returns an existing N8nApiError unchanged,
+   * so the ladder's own mapping rethrows the same tracked instance.
+   */
+  private async sendWorkflowWrite(
+    payload: Record<string, unknown>,
+    send: (body: Record<string, unknown>) => Promise<Workflow>,
+    options: WorkflowWriteOptions
+  ): Promise<Workflow> {
+    const sentBodies = new WeakMap<N8nApiError, Record<string, unknown>>();
+    const trackedSend = async (body: Record<string, unknown>): Promise<Workflow> => {
+      try {
+        return await send(body);
+      } catch (error) {
+        const apiError = handleN8nApiError(error);
+        sentBodies.set(apiError, body);
+        throw apiError;
+      }
+    };
+    try {
+      return await this.sendWorkflowWriteWithGroupFallback(payload, trackedSend, options);
+    } catch (error) {
+      const apiError = handleN8nApiError(error);
+      const enriched = enrichUnknownPropertyError(apiError, sentBodies.get(apiError) ?? payload);
+      if (enriched !== apiError) {
+        // The axios interceptor has already logged n8n's generic message; without this
+        // line the key list reaches only the MCP caller, never the server logs (#1047).
+        logger.warn('n8n rejected a workflow write with an unnamed additional property', {
+          message: enriched.message
+        });
+      }
+      throw enriched;
+    }
+  }
+
+  /**
    * Send a workflow write, degrading `nodeGroups` only as far as the instance forces.
    *
    * n8n validates canvas groups on every write and names the offending group when it rejects one,
@@ -574,7 +617,7 @@ export class N8nApiClient {
    * Omitting the field is not a fix for case 3: n8n backfills the stored groups when the field is
    * absent, so the same rejection returns. Each attempt must make progress or the loop stops.
    */
-  private async sendWorkflowWrite(
+  private async sendWorkflowWriteWithGroupFallback(
     payload: Record<string, unknown>,
     send: (body: Record<string, unknown>) => Promise<Workflow>,
     options: WorkflowWriteOptions
@@ -643,8 +686,8 @@ export class N8nApiClient {
   }
 
   /**
-   * Decide how to retry after n8n rejected a write, per the ladder in sendWorkflowWrite: the groups
-   * to send next, `omit-field` to send no groups at all, or `give-up` to surface n8n's error.
+   * Decide how to retry after n8n rejected a write, per the ladder in sendWorkflowWriteWithGroupFallback:
+   * the groups to send next, `omit-field` to send no groups at all, or `give-up` to surface n8n's error.
    */
   private degradeGroupsAfterRejection(
     classification: GroupErrorClassification,
@@ -661,7 +704,7 @@ export class N8nApiClient {
     }
 
     // Deliberately does not latch groupSupport or warn: whether the field really is the problem is
-    // only known once the retry without it succeeds. sendWorkflowWrite records it there.
+    // only known once the retry without it succeeds. sendWorkflowWriteWithGroupFallback records it there.
     if (classification.kind === 'schema-field') return 'omit-field';
 
     if (classification.kind !== 'semantic') return 'give-up';
@@ -1576,6 +1619,20 @@ export class N8nApiClient {
         `/projects/${encodeApiPathSegment(projectId, 'projectId')}/folders/${encodeApiPathSegment(folderId, 'folderId')}`,
         { params: transferToFolderId ? { transferToFolderId } : {} }
       );
+    } catch (error) {
+      throw handleN8nApiError(error);
+    }
+  }
+
+  /**
+   * GET /projects. Team projects are a licensed feature: unlicensed instances answer
+   * 403 (older ones 404). Callers decide the fallback; this method only reports.
+   */
+  async listProjects(limit = 100): Promise<Project[]> {
+    try {
+      const response = await this.client.get('/projects', { params: { limit } });
+      const payload = response.data;
+      return Array.isArray(payload) ? payload : Array.isArray(payload?.data) ? payload.data : [];
     } catch (error) {
       throw handleN8nApiError(error);
     }

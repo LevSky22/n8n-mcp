@@ -121,10 +121,10 @@ When working with Code nodes, always start by calling the relevant guide:
    - validate_node({nodeType: "nodes-base.slack", config: {...}}) - Full validation with errors/warnings/suggestions
    - validate_workflow({workflow: {...}}) - Validate entire workflow
 
-## Tool Categories (26 Tools Total)
+## Tool Categories (29 Tools Total)
 
-**Documentation Tools** (1 tool)
-- tools_documentation - This reference; pass a topic for one tool, depth='full' for detail
+**Meta Tools** (1 tool)
+- tools_documentation - Get documentation for any MCP tool (this tool)
 
 **Discovery Tools** (1 tool)
 - search_nodes - Full-text search across all nodes (supports OR, AND, FUZZY modes)
@@ -149,7 +149,7 @@ When working with Code nodes, always start by calling the relevant guide:
   - searchMode='by_metadata': Filter by complexity/services
   - searchMode='patterns': Workflow pattern summaries from 2,700+ templates
 
-**n8n API Tools** (18 tools, requires N8N_API_URL configuration)
+**n8n API Tools** (21 tools, requires N8N_API_URL configuration)
 - n8n_create_workflow - Create new workflows
 - n8n_get_workflow - Get workflow with mode='full' (draft) / 'details' / 'active' (published graph) / 'structure' / 'minimal'
 - n8n_update_full_workflow - Full workflow replacement
@@ -158,16 +158,19 @@ When working with Code nodes, always start by calling the relevant guide:
 - n8n_list_workflows - List workflows with filters
 - n8n_validate_workflow - Validate workflow by ID
 - n8n_autofix_workflow - Auto-fix common issues
-- n8n_test_workflow - Test/trigger workflows (webhook, form, chat, execute)
+- n8n_test_workflow - Run a workflow: method='auto'/'trigger' over its webhook/form/chat trigger, or method='prepare'/'pinned'/'direct' through n8n's MCP server (needs N8N_MCP_ACCESS_TOKEN)
 - n8n_executions - Unified execution management (action='get'/'list'/'delete')
 - n8n_evaluations - Run and read evaluation test runs (action='list_runs'/'get_run'/'list_cases' on n8n 2.30+, 'run'/'cancel' on 2.32+)
 - n8n_health_check - Check n8n API connectivity
-- n8n_workflow_versions - Version history and rollback
+- n8n_workflow_versions - Version history, diff and rollback over n8n-mcp snapshots (source='local') or n8n's own history (source='native', needs N8N_MCP_ACCESS_TOKEN)
 - n8n_deploy_template - Deploy templates directly to n8n instance
-- n8n_manage_datatable - Manage data tables and rows
+- n8n_manage_datatable - Manage data tables, rows and columns (addColumn/deleteColumn/renameColumn need N8N_MCP_ACCESS_TOKEN)
 - n8n_manage_credentials - Manage credentials (action='list'/'get'/'create'/'update'/'delete'/'getSchema')
 - n8n_manage_folders - Manage workflow folders (action='create'/'list'/'get'/'rename'/'move'/'delete', n8n 2.19+; workflow placement via parentFolderId/moveToFolder needs 2.32+)
 - n8n_audit_instance - Security audit of the n8n instance
+- n8n_manage_agents - Manage n8n Agents through n8n's instance-level MCP server (requires N8N_MCP_ACCESS_TOKEN, n8n 2.34+)
+- n8n_explore_node_resources - Resolve dynamic dropdown/resource-locator options (Slack channels, Google Sheets tabs, etc.) using a real credential (requires N8N_MCP_ACCESS_TOKEN)
+- n8n_list_catalog - List instance-level projects or tags, with an official-MCP fallback when team projects need it
 
 **Large-Result Tools** (1 tool)
 When a result is too large for context it is stored as an artifact and the response carries a handle in responseMeta.artifact.
