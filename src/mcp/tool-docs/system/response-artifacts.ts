@@ -64,7 +64,7 @@ Arrays page by element and objects page by entry.`,
       fields: {
         type: 'array',
         required: false,
-        description: 'Root property names (id) or RFC 6901 pointers (/status/name) projected from each selected item, max 50. Fields that do not resolve are omitted rather than returned as null; check responseMeta.fieldsResolved.'
+        description: 'Root property names (id) or RFC 6901 pointers (/status/name) projected from each selected item, max 50. Nested paths must begin with /; status/name is treated as one literal root key. Fields that do not resolve are omitted rather than returned as null; check responseMeta.fieldsResolved.'
       },
       filters: {
         type: 'array',
