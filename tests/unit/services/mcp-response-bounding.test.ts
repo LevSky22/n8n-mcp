@@ -379,6 +379,47 @@ describe('MCP response bounding', () => {
     )).toThrow('matched no properties');
   });
 
+  it('suggests a leading slash for nested fields while preserving literal slash keys', () => {
+    const nested = persistResponseArtifact({
+      nodes: [{ parameters: { jsCode: 'return [];' } }],
+    }, 'tenant-a');
+
+    expect(() => queryResponseArtifact(
+      nested.id,
+      '/nodes',
+      ['parameters/jsCode'],
+      undefined,
+      20,
+      undefined,
+      'tenant-a',
+    )).toThrow("Did you mean '/parameters/jsCode' instead of 'parameters/jsCode'?");
+
+    const corrected = queryResponseArtifact(
+      nested.id,
+      '/nodes',
+      ['/parameters/jsCode'],
+      undefined,
+      20,
+      undefined,
+      'tenant-a',
+    ) as any;
+    expect(corrected.response).toEqual([{ '/parameters/jsCode': 'return [];' }]);
+
+    const literal = persistResponseArtifact({
+      rows: [{ 'parameters/jsCode': 'literal root value' }],
+    }, 'tenant-a');
+    const literalProjection = queryResponseArtifact(
+      literal.id,
+      '/rows',
+      ['parameters/jsCode'],
+      undefined,
+      20,
+      undefined,
+      'tenant-a',
+    ) as any;
+    expect(literalProjection.response).toEqual([{ 'parameters/jsCode': 'literal root value' }]);
+  });
+
   it('infers one unambiguous array envelope when projecting from the artifact root', () => {
     const populated = persistResponseArtifact({ fields: [{ id: 'one', name: 'Example' }] }, 'tenant-a');
     const projected = queryResponseArtifact(

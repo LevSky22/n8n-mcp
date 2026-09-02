@@ -77,7 +77,8 @@ artifact into model context. Artifact query paths use RFC 6901. Exact document
 pointers win; when one is missing and the advertised `responseRoot` is non-empty,
 the same pointer is tried once beneath that root and the canonical path is reported
 as `responseMeta.inferredResponsePath`. Projected fields accept either root names
-such as `id` or pointers such as `/status/name`. When fields
+such as `id` or pointers such as `/status/name`. Nested paths must begin with
+`/`; `status/name` means one literal root key, not a nested lookup. When fields
 or filters target an object containing exactly one array child,
 the query selects that collection and reports its pointer as
 `responseMeta.inferredResponsePath`; ambiguous objects still require a

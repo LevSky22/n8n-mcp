@@ -146,7 +146,8 @@ export const queryResponseArtifactTool = {
     '(responseMeta.artifact.primaryPaths lists pointers that do). responsePath uses RFC 6901 and ' +
     'defaults to the artifact responseRoot when omitted. Exact pointers win; if one is missing and ' +
     'responseRoot is non-empty, it is tried once beneath that root and the canonical pointer is reported. ' +
-    'fields accepts root names such as id or pointers such as /status/name. Arrays page by element and ' +
+    'fields accepts root names such as id or pointers such as /status/name. Nested paths must begin ' +
+    'with /; status/name is treated as one literal root key. Arrays page by element and ' +
     'objects page by entry. For keyed maps such as n8n connections, set objectMode="entries" and filter ' +
     'on /key rather than guessing nested array paths. Use textSearch for a bounded literal search across ' +
     'large string values. Shape descriptions and result sets are pageable; pass responseMeta.nextCursor ' +
@@ -175,7 +176,7 @@ export const queryResponseArtifactTool = {
         type: 'array',
         maxItems: 50,
         items: { type: 'string' },
-        description: 'Optional root property names (id) or RFC 6901 pointers (/status/name) projected from each selected item. Fields that do not resolve are omitted, not returned as null; see responseMeta.fieldsResolved.',
+        description: 'Optional root property names (id) or RFC 6901 pointers (/status/name) projected from each selected item. Nested paths must begin with /; status/name is treated as one literal root key. Fields that do not resolve are omitted, not returned as null; see responseMeta.fieldsResolved.',
       },
       filters: {
         type: 'array',
@@ -454,6 +455,34 @@ function projectItem(item: unknown, fields: string[], resolved: Record<string, n
   return value;
 }
 
+function nestedFieldPointerHint(selected: unknown, fields: string[]): string {
+  const samples = Array.isArray(selected) ? selected : [selected];
+  const suggestions: Array<[string, string]> = [];
+  for (const field of fields) {
+    if (field.startsWith('/') || !field.includes('/')) continue;
+    const candidate = `/${field}`;
+    if (samples.some((sample) => {
+      try {
+        pointer(sample, candidate);
+        return true;
+      } catch (error) {
+        if (error instanceof JsonPointerResolutionError) return false;
+        throw error;
+      }
+    })) {
+      suggestions.push([field, candidate]);
+    }
+  }
+
+  if (suggestions.length === 0) return '';
+  if (suggestions.length === 1) {
+    const [field, candidate] = suggestions[0];
+    return ` Nested field paths must begin with '/'. Did you mean '${candidate}' instead of '${field}'?`;
+  }
+  const rendered = suggestions.map(([field, candidate]) => `'${field}' -> '${candidate}'`).join(', ');
+  return ` Nested field paths must begin with '/'. Did you mean: ${rendered}?`;
+}
+
 function projectSelection(
   selected: unknown,
   fields: string[],
@@ -467,7 +496,8 @@ function projectSelection(
       throw invalidResponseControls(
         `fields matched no properties on any of the ${selected.length} selected items. ` +
         `Each item exposes: ${describeAvailableKeys(selected[0])}. ` +
-        `Use root names such as 'id' or RFC 6901 pointers such as '/status/name'.`,
+        `Use root names such as 'id' or RFC 6901 pointers such as '/status/name'.` +
+        nestedFieldPointerHint(selected, fields),
       );
     }
     return { value: projected, resolved };
@@ -477,7 +507,8 @@ function projectSelection(
   if (!Object.values(resolved).some(count => count > 0)) {
     throw invalidResponseControls(
       `fields matched no properties. The selected value exposes: ${describeAvailableKeys(selected)}. ` +
-      `Use root names such as 'id' or RFC 6901 pointers such as '/status/name'.`,
+      `Use root names such as 'id' or RFC 6901 pointers such as '/status/name'.` +
+      nestedFieldPointerHint(selected, fields),
     );
   }
   return { value: projected, resolved };
