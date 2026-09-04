@@ -5,14 +5,15 @@
 
 import { z } from 'zod';
 import { randomUUID } from 'crypto';
-import { McpToolResponse } from '../types/n8n-api';
+import { isDeepStrictEqual } from 'node:util';
+import { McpToolResponse, Workflow } from '../types/n8n-api';
 import { WorkflowDiffRequest, WorkflowDiffOperation, WorkflowDiffValidationError } from '../types/workflow-diff';
 import { WorkflowDiffEngine } from '../services/workflow-diff-engine';
 import { getN8nApiClient } from './handlers-n8n-manager';
 import { N8nApiError, getUserFriendlyErrorMessage } from '../utils/n8n-errors';
 import { logger } from '../utils/logger';
 import { InstanceContext, getInstanceScopeId } from '../types/instance-context';
-import { validateWorkflowStructure } from '../services/n8n-validation';
+import { validateWorkflowStructure, cleanWorkflowForUpdate } from '../services/n8n-validation';
 import { NodeRepository } from '../database/node-repository';
 import { WorkflowVersioningService } from '../services/workflow-versioning-service';
 import { WorkflowValidator } from '../services/workflow-validator';
@@ -46,6 +47,38 @@ function compareVersions(
     return a.updatedAt === b.updatedAt ? 'same' : 'changed';
   }
   return 'unknown';
+}
+
+// Ids of nodes that lack a webhookId in the given read. cleanWorkflowForUpdate() assigns a random
+// one to such nodes, and the server persists it, so the snapshot taken before a write and the read
+// taken after it legitimately differ there. A webhookId both reads carry is real content.
+function nodesWithoutWebhookId(workflow: Workflow): string[] {
+  return (workflow.nodes ?? []).filter(node => node.id && !node.webhookId).map(node => node.id);
+}
+
+// The shape an update would send, for comparing two reads of the same workflow. Cloned because
+// cleanWorkflowForUpdate() mutates its input.
+function writableShape(workflow: Workflow, ignoreWebhookIdOf: Set<string>): Record<string, unknown> {
+  const cleaned = cleanWorkflowForUpdate(structuredClone(workflow)) as Record<string, unknown>;
+  if (Array.isArray(cleaned.nodes)) {
+    for (const node of cleaned.nodes) {
+      if (ignoreWebhookIdOf.has(node.id)) delete node.webhookId;
+    }
+  }
+  return cleaned;
+}
+
+// Compare only the fields the update allowlist accepts. Version identity cannot verify a rollback:
+// a successful rollback writes a new version, so compareVersions() reports 'changed' regardless.
+// Generated webhook ids are ignored on both sides whichever read lacks them, so the outcome does
+// not depend on whether an earlier write mutated the snapshot in place.
+function sameWritableContent(a: Workflow, b: Workflow): boolean {
+  try {
+    const generated = new Set([...nodesWithoutWebhookId(a), ...nodesWithoutWebhookId(b)]);
+    return isDeepStrictEqual(writableShape(a, generated), writableShape(b, generated));
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -422,6 +455,7 @@ export async function handleUpdatePartialWorkflow(
 
           // Either persist-then-fail OR couldn't determine — attempt rollback.
           let rollbackPerformed = false;
+          let rollbackVerifiedAfterError = false;
           let rollbackErrorMessage: string | undefined;
           try {
             // No authoredGroups here: restoring the graph matters, frames do not. If the snapshot's
@@ -436,11 +470,32 @@ export async function handleUpdatePartialWorkflow(
             });
           } catch (rollbackErr) {
             rollbackErrorMessage = rollbackErr instanceof Error ? rollbackErr.message : String(rollbackErr);
-            logger.error('updateWorkflow failed AND rollback failed', {
-              workflowId: input.id,
-              originalError: updateError instanceof Error ? updateError.message : String(updateError),
-              rollbackError: rollbackErrorMessage,
-            });
+
+            // n8n can persist a rollback PUT and then reject it: the public API commits workflow
+            // content before it checks publish permission. Verify against the server rather than
+            // trusting the throw, or we warn of a broken workflow that was in fact restored.
+            try {
+              const afterRollback = await client.getWorkflow(input.id);
+              if (sameWritableContent(afterRollback, workflowBefore)) {
+                rollbackPerformed = true;
+                rollbackVerifiedAfterError = true;
+                logger.warn('rollback PUT errored but content matches the prior state; treating as rolled back', {
+                  workflowId: input.id,
+                  rollbackError: rollbackErrorMessage,
+                });
+                rollbackErrorMessage = undefined;
+              }
+            } catch (verifyErr) {
+              logger.debug('post-rollback verification GET failed', verifyErr);
+            }
+
+            if (!rollbackPerformed) {
+              logger.error('updateWorkflow failed AND rollback failed', {
+                workflowId: input.id,
+                originalError: updateError instanceof Error ? updateError.message : String(updateError),
+                rollbackError: rollbackErrorMessage,
+              });
+            }
           }
 
           // Re-throw with rollback context attached so the outer N8nApiError
@@ -454,6 +509,7 @@ export async function handleUpdatePartialWorkflow(
             const augmentedDetails: Record<string, unknown> = {
               ...((updateError.details as Record<string, unknown>) ?? {}),
               rollbackPerformed,
+              ...(rollbackVerifiedAfterError ? { rollbackVerifiedAfterError: true } : {}),
               ...(folderMoveInPayload && rollbackPerformed ? { folderMoveMayHavePersisted: true } : {}),
               ...(rollbackErrorMessage ? { rollbackError: rollbackErrorMessage } : {}),
               ...(workflowBefore.versionId ? { priorVersionId: workflowBefore.versionId } : {}),

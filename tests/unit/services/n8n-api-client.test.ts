@@ -594,6 +594,207 @@ describe('N8nApiClient', () => {
     });
   });
 
+  describe('settings the instance rejects as unknown', () => {
+    // n8n's schema is additionalProperties: false, and the AJV message for a settings-level
+    // rejection never names the key. The client retries without candidates, newest first, and
+    // reports what it had to leave out.
+    const badRequest = (message: string) =>
+      createAxiosError({ message, response: { status: 400, data: { message } } });
+    const settingsRejected = () => badRequest('request/body/settings must NOT have additional properties');
+    const workflowWith = (settings: Record<string, unknown>) => ({
+      name: 'Settings',
+      nodes: [],
+      connections: {},
+      settings,
+    });
+
+    beforeEach(() => {
+      client = new N8nApiClient(defaultConfig);
+    });
+
+    it('retries without the keys it does not know before touching known ones, and warns', async () => {
+      mockAxiosInstance.put
+        .mockRejectedValueOnce(settingsRejected())
+        .mockResolvedValue({ data: { id: '123' } });
+      const warnings: string[] = [];
+
+      await client.updateWorkflow('123', workflowWith({ executionOrder: 'v1', timeSavedMode: 'fixed', mysteryKey: 1 }), {
+        onWarning: w => warnings.push(w),
+      });
+
+      expect(mockAxiosInstance.put).toHaveBeenCalledTimes(2);
+      expect(mockAxiosInstance.put.mock.calls[1][1].settings).toEqual({ executionOrder: 'v1', timeSavedMode: 'fixed' });
+      expect(warnings).toHaveLength(1);
+      expect(warnings[0]).toContain('mysteryKey');
+      expect(warnings[0]).not.toContain('timeSavedMode');
+    });
+
+    it('then drops known keys one at a time from newest to oldest', async () => {
+      mockAxiosInstance.put
+        .mockRejectedValueOnce(settingsRejected())
+        .mockRejectedValueOnce(settingsRejected())
+        .mockResolvedValue({ data: { id: '123' } });
+      const warnings: string[] = [];
+
+      await client.updateWorkflow(
+        '123',
+        workflowWith({ executionOrder: 'v1', redactionPolicy: 'strict', timeSavedMode: 'fixed', mysteryKey: 1 }),
+        { onWarning: w => warnings.push(w) }
+      );
+
+      const bodies = mockAxiosInstance.put.mock.calls.map((call: any[]) => call[1].settings);
+      expect(bodies).toEqual([
+        { executionOrder: 'v1', redactionPolicy: 'strict', timeSavedMode: 'fixed', mysteryKey: 1 },
+        { executionOrder: 'v1', redactionPolicy: 'strict', timeSavedMode: 'fixed' },
+        { executionOrder: 'v1', redactionPolicy: 'strict' },
+      ]);
+      expect(warnings.join(' ')).toContain('mysteryKey, timeSavedMode');
+    });
+
+    it('remembers a rejected key and strips it from the next write without probing again', async () => {
+      mockAxiosInstance.put
+        .mockRejectedValueOnce(settingsRejected())
+        .mockResolvedValue({ data: { id: '123' } });
+      const warnings: string[] = [];
+
+      await client.updateWorkflow('123', workflowWith({ executionOrder: 'v1', mysteryKey: 1 }));
+      await client.updateWorkflow('123', workflowWith({ executionOrder: 'v1', mysteryKey: 1 }), {
+        onWarning: w => warnings.push(w),
+      });
+
+      expect(mockAxiosInstance.put).toHaveBeenCalledTimes(3);
+      expect(mockAxiosInstance.put.mock.calls[2][1].settings).toEqual({ executionOrder: 'v1' });
+      expect(warnings.join(' ')).toContain('mysteryKey');
+    });
+
+    it('does not remember a batch of unknown keys, since only one of them may be the culprit', async () => {
+      mockAxiosInstance.put
+        .mockRejectedValueOnce(settingsRejected())
+        .mockResolvedValue({ data: { id: '123' } });
+      const settings = { executionOrder: 'v1', mysteryKey: 1, settingAddedNextWeek: true };
+
+      await client.updateWorkflow('123', workflowWith(settings));
+      mockAxiosInstance.put.mockRejectedValueOnce(settingsRejected()).mockResolvedValue({ data: { id: '123' } });
+      await client.updateWorkflow('123', workflowWith(settings));
+
+      // 2 for the first call, 2 for the second: the batch is probed again, not stripped up front.
+      expect(mockAxiosInstance.put).toHaveBeenCalledTimes(4);
+      expect(mockAxiosInstance.put.mock.calls[2][1].settings).toEqual(settings);
+    });
+
+    it('falls back to the minimal settings n8n accepts when every key was rejected', async () => {
+      mockAxiosInstance.put
+        .mockRejectedValueOnce(settingsRejected())
+        .mockResolvedValue({ data: { id: '123' } });
+
+      await client.updateWorkflow('123', workflowWith({ mysteryKey: 1 }));
+
+      expect(mockAxiosInstance.put.mock.calls[1][1].settings).toEqual({ executionOrder: 'v1' });
+    });
+
+    it('surfaces the rejection once the ladder is exhausted', async () => {
+      mockAxiosInstance.put.mockRejectedValue(settingsRejected());
+
+      await expect(
+        client.updateWorkflow('123', workflowWith({ executionOrder: 'v1', timeSavedMode: 'fixed', mysteryKey: 1 }))
+      ).rejects.toThrow(/additional properties/);
+
+      // original, without unknown keys, without timeSavedMode: three sends, then give up.
+      expect(mockAxiosInstance.put).toHaveBeenCalledTimes(3);
+    });
+
+    it('does not retry a rejection that names a different path', async () => {
+      mockAxiosInstance.put.mockRejectedValue(badRequest('request/body/nodes/0 must NOT have additional properties'));
+
+      await expect(client.updateWorkflow('123', workflowWith({ executionOrder: 'v1', mysteryKey: 1 }))).rejects.toThrow();
+
+      expect(mockAxiosInstance.put).toHaveBeenCalledTimes(1);
+    });
+
+    it('reaches the ladder when the settings rejection surfaces on the group ladder\'s retry', async () => {
+      // First send: groups rejected without a name. The group ladder retries without the field
+      // to confirm; that retry is refused for settings. The settings complaint must win, or the
+      // write fails with the groups error and the settings ladder never runs.
+      mockAxiosInstance.put
+        .mockRejectedValueOnce(badRequest('request/body must NOT have additional properties'))
+        .mockRejectedValueOnce(settingsRejected())
+        .mockResolvedValue({ data: { id: '123' } });
+
+      await client.updateWorkflow('123', {
+        ...workflowWith({ executionOrder: 'v1', mysteryKey: 1 }),
+        nodes: [{ id: 'a', name: 'A', type: 'n8n-nodes-base.set', typeVersion: 1, position: [0, 0], parameters: {} }],
+        nodeGroups: [{ id: 'g1', name: 'G', nodeIds: ['a'] }],
+      } as any);
+
+      const last = mockAxiosInstance.put.mock.calls.at(-1)![1];
+      expect(last.settings).toEqual({ executionOrder: 'v1' });
+      // The failed confirmation probe must not have latched the instance as group-less.
+      expect(last.nodeGroups).toEqual([{ id: 'g1', name: 'G', nodeIds: ['a'] }]);
+    });
+
+    it('drops exactly the keys n8n names when the rejection names them (n8n 2.37 create wording)', async () => {
+      mockAxiosInstance.post
+        .mockRejectedValueOnce(badRequest("request/body/settings Unrecognized key(s) in object: 'mysteryKey', 'timeSavedMode'"))
+        .mockResolvedValue({ data: { id: '123' } });
+      const warnings: string[] = [];
+      const settings = { executionOrder: 'v1', redactionPolicy: 'strict', timeSavedMode: 'fixed', mysteryKey: 1 };
+
+      await client.createWorkflow(workflowWith(settings), { onWarning: w => warnings.push(w) });
+      mockAxiosInstance.post.mockResolvedValue({ data: { id: '124' } });
+      await client.createWorkflow(workflowWith(settings));
+
+      // One retry without both named keys, redactionPolicy untouched; both remembered as certain.
+      expect(mockAxiosInstance.post).toHaveBeenCalledTimes(3);
+      expect(mockAxiosInstance.post.mock.calls[1][1].settings).toEqual({ executionOrder: 'v1', redactionPolicy: 'strict' });
+      expect(mockAxiosInstance.post.mock.calls[2][1].settings).toEqual({ executionOrder: 'v1', redactionPolicy: 'strict' });
+      expect(warnings.join(' ')).toContain('mysteryKey, timeSavedMode');
+    });
+
+    it('remembers only what n8n named or the single guess the success followed', async () => {
+      // The AJV ladder first guesses mysteryKey (the only unknown key) and is still rejected;
+      // n8n then names redactionPolicy, and the write succeeds without it.
+      mockAxiosInstance.put
+        .mockRejectedValueOnce(badRequest('request/body/settings must NOT have additional properties'))
+        .mockRejectedValueOnce(badRequest("request/body/settings Unrecognized key(s) in object: 'redactionPolicy'"))
+        .mockResolvedValue({ data: { id: '123' } });
+      const settings = { executionOrder: 'v1', timeSavedMode: 'fixed', mysteryKey: 1, redactionPolicy: 'strict' };
+
+      await client.updateWorkflow('123', workflowWith(settings));
+      await client.updateWorkflow('123', workflowWith(settings));
+
+      // Only redactionPolicy is remembered: n8n named it. mysteryKey was a guess the success did
+      // not follow, so it is sent again rather than stripped on suspicion.
+      expect(mockAxiosInstance.put).toHaveBeenCalledTimes(4);
+      const secondWriteBody = mockAxiosInstance.put.mock.calls[3][1];
+      expect(secondWriteBody.settings).toEqual({ executionOrder: 'v1', timeSavedMode: 'fixed', mysteryKey: 1 });
+    });
+
+    it('ignores a named key that is not in the payload and falls back to the ladder', async () => {
+      mockAxiosInstance.post
+        .mockRejectedValueOnce(badRequest("request/body/settings Unrecognized key(s) in object: 'notSent'"))
+        .mockResolvedValue({ data: { id: '123' } });
+      const warnings: string[] = [];
+
+      await client.createWorkflow(workflowWith({ executionOrder: 'v1', mysteryKey: 1 }), { onWarning: w => warnings.push(w) });
+
+      expect(mockAxiosInstance.post).toHaveBeenCalledTimes(2);
+      expect(mockAxiosInstance.post.mock.calls[1][1].settings).toEqual({ executionOrder: 'v1' });
+      expect(warnings.join(' ')).toContain('mysteryKey');
+      expect(warnings.join(' ')).not.toContain('notSent');
+    });
+
+    it('applies to create as well as update', async () => {
+      mockAxiosInstance.post
+        .mockRejectedValueOnce(settingsRejected())
+        .mockResolvedValue({ data: { id: '123' } });
+
+      await client.createWorkflow(workflowWith({ executionOrder: 'v1', mysteryKey: 1 }));
+
+      expect(mockAxiosInstance.post).toHaveBeenCalledTimes(2);
+      expect(mockAxiosInstance.post.mock.calls[1][1].settings).toEqual({ executionOrder: 'v1' });
+    });
+  });
+
   describe('canvas groups (nodeGroups)', () => {
     // n8n validates canvas groups on every write, including writes unrelated to grouping, and
     // names the group it rejects. These cover the degradation ladder that keeps an unrelated edit

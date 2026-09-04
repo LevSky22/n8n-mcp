@@ -95,6 +95,25 @@ const PRIVATE_IP_RANGES = [
 
 export class SSRFProtection {
   /**
+   * Whether a bracket-stripped host names the local machine: a LOCALHOST_PATTERNS entry
+   * (these include `0.0.0.0`, the unspecified address rather than a loopback one) or any
+   * 127.0.0.0/8 literal.
+   *
+   * Shared by {@link validateUrlSync} and {@link validateResolvedAddress} so
+   * both agree on what `moderate` allows. Before #1033 they disagreed on
+   * literals: `http://localhost` passed the sync check while the same host
+   * spelled `http://127.0.0.1` was refused as a private IP.
+   *
+   * All of 127.0.0.0/8 is loopback, not just `127.0.0.1`, but the prefix test
+   * is gated on {@link isIPv4} so the DNS name `127.example.com` is not
+   * mistaken for a literal (same reasoning as the #984 gate on
+   * PRIVATE_IP_RANGES).
+   */
+  private static isLoopbackHost(host: string): boolean {
+    return LOCALHOST_PATTERNS.has(host) || (isIPv4(host) && host.startsWith('127.'));
+  }
+
+  /**
    * IPv6 addresses that must be blocked: loopback, unspecified, link-local,
    * unique-local, site-local (deprecated), multicast, IPv4-mapped,
    * IPv4-compatible, and any IPv6→IPv4 tunneling address (NAT64, 6to4, Teredo)
@@ -406,9 +425,11 @@ export class SSRFProtection {
     }
 
     // Check if target is localhost
-    const isLocalhost = LOCALHOST_PATTERNS.has(hostname) ||
-                      resolvedIP === '::1' ||
-                      resolvedIP.startsWith('127.');
+    // The literal check is shared with validateUrlSync; the resolved address keeps the narrower
+    // test it always had, so a DNS name that resolves to 0.0.0.0 stays refused under moderate.
+    const isLocalhost = SSRFProtection.isLoopbackHost(hostname) ||
+                        resolvedIP === '::1' ||
+                        resolvedIP.startsWith('127.');
 
     // MODE: strict - Block localhost and private IPs
     if (mode === 'strict' && isLocalhost) {
@@ -610,8 +631,18 @@ export class SSRFProtection {
       return { valid: true };
     }
 
-    if (mode === 'strict' && LOCALHOST_PATTERNS.has(hostname)) {
+    const isLocalhost = SSRFProtection.isLoopbackHost(hostname);
+
+    if (mode === 'strict' && isLocalhost) {
       return { valid: false, reason: 'Localhost access is blocked in strict mode' };
+    }
+
+    // MODE: moderate - Allow localhost, block private IPs. Must run before the
+    // PRIVATE_IP_RANGES and IPv6 gates below, which also cover loopback
+    // (127.0.0.0/8, ::1) and would otherwise refuse the literals moderate
+    // exists to permit. Same ordering as validateResolvedAddress.
+    if (mode === 'moderate' && isLocalhost) {
+      return { valid: true };
     }
 
     // SECURITY (#984): PRIVATE_IP_RANGES are prefix regexes, so gate them on

@@ -11,7 +11,9 @@ import {
 
 // Zod schemas for n8n API validation
 
-export const workflowNodeSchema = z.preprocess(normalizeMcpWorkflowNode, z.object({
+// The writable node shape, kept separate from the preprocess wrapper so the write allowlist
+// below can be derived from its keys instead of being maintained as a second list.
+const workflowNodeObjectSchema = z.object({
   id: z.string(),
   name: z.string(),
   type: z.string(),
@@ -27,12 +29,37 @@ export const workflowNodeSchema = z.preprocess(normalizeMcpWorkflowNode, z.objec
   notes: z.string().optional(),
   notesInFlow: z.boolean().optional(),
   continueOnFail: z.boolean().optional(),
+  onError: z.enum(['continueRegularOutput', 'continueErrorOutput', 'stopWorkflow']).optional(),
   retryOnFail: z.boolean().optional(),
   maxTries: z.number().optional(),
   waitBetweenTries: z.number().optional(),
   alwaysOutputData: z.boolean().optional(),
   executeOnce: z.boolean().optional(),
-}));
+  webhookId: z.string().optional(),
+  customTelemetryTags: z
+    .object({ tag: z.array(z.object({ key: z.string(), value: z.string() })).optional() })
+    .optional(),
+});
+
+export const workflowNodeSchema = z.preprocess(normalizeMcpWorkflowNode, workflowNodeObjectSchema);
+
+/**
+ * Node properties n8n's Public API write schema accepts, taken from the zod schema above so the
+ * two cannot drift apart. n8n's node schema is `additionalProperties: false`, so a property missing
+ * here is dropped from every write; `npm run check:settings-drift` compares this set against the
+ * schema n8n ships and fails when n8n adds one.
+ */
+export const WRITABLE_NODE_PROPERTIES: ReadonlySet<string> = new Set(Object.keys(workflowNodeObjectSchema.shape));
+
+/**
+ * Strip unknown properties from a single node so it conforms to n8n's write schema.
+ * n8n GET responses echo server-managed fields (e.g. issues, runIndex, data) that
+ * PUT/PATCH rejects with "must NOT have additional properties".
+ */
+export function cleanNodeForApi(node: WorkflowNode): WorkflowNode {
+  const cleaned = Object.entries(node).filter(([key]) => WRITABLE_NODE_PROPERTIES.has(key));
+  return Object.fromEntries(cleaned) as WorkflowNode;
+}
 
 // Connection array schema used by all connection types
 const connectionArraySchema = z.array(
@@ -177,6 +204,11 @@ export function cleanWorkflowForCreate(workflow: Partial<Workflow>): Partial<Wor
 
   ensureWebhookIds(cleanedWorkflow.nodes);
 
+  // Strip unknown node properties that n8n GET echoes but PUT/PATCH rejects
+  if (cleanedWorkflow.nodes) {
+    cleanedWorkflow.nodes = cleanedWorkflow.nodes.map(cleanNodeForApi);
+  }
+
   return cleanedWorkflow;
 }
 
@@ -248,6 +280,11 @@ export function cleanWorkflowForUpdate(workflow: Workflow): Partial<Workflow> {
   }
 
   ensureWebhookIds(cleanedWorkflow.nodes as WorkflowNode[] | undefined);
+
+  // Strip unknown node properties that n8n GET echoes but PUT/PATCH rejects
+  if (cleanedWorkflow.nodes) {
+    cleanedWorkflow.nodes = (cleanedWorkflow.nodes as WorkflowNode[]).map(cleanNodeForApi);
+  }
 
   return cleanedWorkflow as Partial<Workflow>;
 }

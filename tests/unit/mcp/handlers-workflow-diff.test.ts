@@ -1150,7 +1150,10 @@ describe('handlers-workflow-diff', () => {
 
       mockApiClient.getWorkflow
         .mockResolvedValueOnce(before)
-        .mockResolvedValueOnce(afterPersist);
+        .mockResolvedValueOnce(afterPersist)
+        // The post-rollback verification read fails too, so the outcome stays inconclusive and the
+        // warning stands. Explicit rather than relying on an unconfigured mock.
+        .mockRejectedValueOnce(new N8nServerError('n8n unreachable', 503));
       mockDiffEngine.applyDiff.mockResolvedValue({
         success: true,
         workflow: before,
@@ -1179,6 +1182,231 @@ describe('handlers-workflow-diff', () => {
         rollbackPerformed: false,
         rollbackError: 'n8n unreachable',
         priorVersionId: 'v1',
+      });
+    });
+
+    it('should treat a rollback as performed when its PUT errored but the content was restored', async () => {
+      // n8n's public API commits workflow content before it checks publish permission, so a
+      // rollback PUT can persist and then throw. Version identity cannot settle it: the restored
+      // workflow necessarily carries a new versionId, so the writable content is what must be
+      // compared. Reporting a broken workflow here invites a riskier recovery than doing nothing.
+      // Names differ so the fixture actually models a reverted change rather than passing on
+      // workflows that were identical all along.
+      const before = createTestWorkflow({ name: 'Original Workflow', versionId: 'v1' });
+      const attempted = createTestWorkflow({ name: 'Renamed Workflow', versionId: 'v1' });
+      const afterPersist = createTestWorkflow({ name: 'Renamed Workflow', versionId: 'v2' });
+      const afterRollback = createTestWorkflow({ name: 'Original Workflow', versionId: 'v3' });
+      const validationError = new N8nValidationError('Invalid workflow structure', {
+        field: 'connections',
+        message: 'Invalid connection configuration',
+      });
+      const publishRefused = new N8nNotFoundError(
+        'You do not have permission to activate this workflow. Ask the owner to share it with you.',
+      );
+
+      mockApiClient.getWorkflow
+        .mockResolvedValueOnce(before)
+        .mockResolvedValueOnce(afterPersist)
+        .mockResolvedValueOnce(afterRollback);
+      mockDiffEngine.applyDiff.mockResolvedValue({
+        success: true,
+        workflow: attempted,
+        operationsApplied: 1,
+        message: 'Success',
+        errors: [],
+      });
+      mockApiClient.updateWorkflow
+        .mockRejectedValueOnce(validationError)
+        .mockRejectedValueOnce(publishRefused);
+
+      const result = await handleUpdatePartialWorkflow({
+        id: 'test-id',
+        operations: [{ type: 'updateName', name: 'Renamed Workflow' }],
+      }, mockRepository);
+
+      expect(mockApiClient.updateWorkflow).toHaveBeenCalledTimes(2);
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('workflow restored to prior state');
+      expect(result.error).not.toContain('rollback also failed');
+      expect(result.details).toMatchObject({
+        rollbackPerformed: true,
+        rollbackVerifiedAfterError: true,
+      });
+      expect(result.details).not.toHaveProperty('rollbackError');
+    });
+
+    it('should still report rollback failure when the content was not restored', async () => {
+      // The verification must not turn every rollback failure into a success: if the server still
+      // holds the attempted change, the warning has to stand.
+      const before = createTestWorkflow({ name: 'Original Workflow', versionId: 'v1' });
+      const attempted = createTestWorkflow({ name: 'Renamed Workflow', versionId: 'v1' });
+      const afterPersist = createTestWorkflow({ name: 'Renamed Workflow', versionId: 'v2' });
+      const validationError = new N8nValidationError('Invalid workflow structure', {
+        field: 'connections',
+        message: 'Invalid connection configuration',
+      });
+      const rollbackFailure = new N8nServerError('n8n unreachable', 503);
+
+      mockApiClient.getWorkflow
+        .mockResolvedValueOnce(before)
+        .mockResolvedValueOnce(afterPersist)
+        .mockResolvedValueOnce(afterPersist);
+      mockDiffEngine.applyDiff.mockResolvedValue({
+        success: true,
+        workflow: attempted,
+        operationsApplied: 1,
+        message: 'Success',
+        errors: [],
+      });
+      mockApiClient.updateWorkflow
+        .mockRejectedValueOnce(validationError)
+        .mockRejectedValueOnce(rollbackFailure);
+
+      const result = await handleUpdatePartialWorkflow({
+        id: 'test-id',
+        operations: [{ type: 'updateName', name: 'Renamed Workflow' }],
+      }, mockRepository);
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('rollback also failed');
+      expect(result.details).toMatchObject({
+        rollbackPerformed: false,
+        rollbackError: 'n8n unreachable',
+      });
+      expect(result.details).not.toHaveProperty('rollbackVerifiedAfterError');
+    });
+
+    it('should verify a restored workflow that contains a webhook node', async () => {
+      // Guards a subtle trap: the update allowlist assigns a random webhookId to webhook nodes that
+      // lack one, and does so in place. Comparing the raw cleaned output would mutate both reads and
+      // give each a different id, so a webhook workflow would never compare equal to itself.
+      const webhookNode = {
+        id: 'hook1',
+        name: 'Webhook',
+        type: 'n8n-nodes-base.webhook',
+        typeVersion: 2,
+        position: [0, 0],
+        parameters: { path: 'incoming' },
+      };
+      const before = createTestWorkflow({
+        name: 'Original Workflow',
+        versionId: 'v1',
+        nodes: [webhookNode],
+        connections: {},
+      });
+      const attempted = createTestWorkflow({
+        name: 'Renamed Workflow',
+        versionId: 'v1',
+        nodes: [webhookNode],
+        connections: {},
+      });
+      const afterPersist = createTestWorkflow({
+        name: 'Renamed Workflow',
+        versionId: 'v2',
+        nodes: [webhookNode],
+        connections: {},
+      });
+      const afterRollback = createTestWorkflow({
+        name: 'Original Workflow',
+        versionId: 'v3',
+        nodes: [webhookNode],
+        connections: {},
+      });
+      const validationError = new N8nValidationError('Invalid workflow structure', {
+        field: 'connections',
+        message: 'Invalid connection configuration',
+      });
+      const publishRefused = new N8nNotFoundError(
+        'You do not have permission to activate this workflow. Ask the owner to share it with you.',
+      );
+
+      mockApiClient.getWorkflow
+        .mockResolvedValueOnce(before)
+        .mockResolvedValueOnce(afterPersist)
+        .mockResolvedValueOnce(afterRollback);
+      mockDiffEngine.applyDiff.mockResolvedValue({
+        success: true,
+        workflow: attempted,
+        operationsApplied: 1,
+        message: 'Success',
+        errors: [],
+      });
+      mockApiClient.updateWorkflow
+        .mockRejectedValueOnce(validationError)
+        .mockRejectedValueOnce(publishRefused);
+
+      const result = await handleUpdatePartialWorkflow({
+        id: 'test-id',
+        operations: [{ type: 'updateName', name: 'Renamed Workflow' }],
+      }, mockRepository);
+
+      expect(result.details).toMatchObject({
+        rollbackPerformed: true,
+        rollbackVerifiedAfterError: true,
+      });
+    });
+
+    it('should still report rollback failure when only a pre-existing webhookId differs', async () => {
+      // A webhookId the workflow already carried is real content, not a value the allowlist made up,
+      // so a change to one means the prior state was not restored. Only generated ids are ignored.
+      const hook = (webhookId: string) => ({
+        id: 'hook1',
+        name: 'Webhook',
+        type: 'n8n-nodes-base.webhook',
+        typeVersion: 2,
+        position: [0, 0],
+        parameters: { path: 'incoming' },
+        webhookId,
+      });
+      const before = createTestWorkflow({
+        name: 'Original Workflow',
+        versionId: 'v1',
+        nodes: [hook('stable-hook-id')],
+        connections: {},
+      });
+      const afterPersist = createTestWorkflow({
+        name: 'Original Workflow',
+        versionId: 'v2',
+        nodes: [hook('stable-hook-id')],
+        connections: {},
+      });
+      const afterRollback = createTestWorkflow({
+        name: 'Original Workflow',
+        versionId: 'v3',
+        nodes: [hook('replaced-hook-id')],
+        connections: {},
+      });
+      const validationError = new N8nValidationError('Invalid workflow structure', {
+        field: 'connections',
+        message: 'Invalid connection configuration',
+      });
+      const publishRefused = new N8nNotFoundError(
+        'You do not have permission to activate this workflow. Ask the owner to share it with you.',
+      );
+
+      mockApiClient.getWorkflow
+        .mockResolvedValueOnce(before)
+        .mockResolvedValueOnce(afterPersist)
+        .mockResolvedValueOnce(afterRollback);
+      mockDiffEngine.applyDiff.mockResolvedValue({
+        success: true,
+        workflow: before,
+        operationsApplied: 1,
+        message: 'Success',
+        errors: [],
+      });
+      mockApiClient.updateWorkflow
+        .mockRejectedValueOnce(validationError)
+        .mockRejectedValueOnce(publishRefused);
+
+      const result = await handleUpdatePartialWorkflow({
+        id: 'test-id',
+        operations: [{ type: 'updateName', name: 'Original Workflow' }],
+      }, mockRepository);
+
+      expect(result.error).toContain('rollback also failed');
+      expect(result.details).toMatchObject({
+        rollbackPerformed: false,
       });
     });
 

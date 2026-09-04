@@ -142,6 +142,46 @@ function folderPlacementHint(error: N8nApiError): string {
 }
 
 /**
+ * n8n rejects an unknown settings key in one of two wordings, depending on the endpoint and
+ * version: AJV's `request/body/settings must NOT have additional properties` (update, and
+ * create before n8n 2.37) which never names the key, and zod's
+ * `request/body/settings Unrecognized key(s) in object: 'a', 'b'` (create on n8n 2.37+),
+ * which does.
+ */
+const SETTINGS_ADDITIONAL_PROPERTY = /body\/settings (?:must NOT have additional propert|Unrecognized key\(s\) in object)/i;
+// Captures only the quoted list, at the given path; the same message is usually echoed inside
+// the details JSON, and a nodes-level rejection can sit in the same text as a settings-level one.
+const unrecognizedKeysAt = (path: string) =>
+  new RegExp(`${path} Unrecognized key\\(s\\) in object: ((?:'[^']*'(?:,\\s*)?)+)`, 'i');
+const parseUnrecognizedKeys = (haystack: string, path: string): string[] => {
+  const named = unrecognizedKeysAt(path).exec(haystack);
+  if (!named) return [];
+  return [...new Set(Array.from(named[1].matchAll(/'([^']+)'/g), match => match[1]))];
+};
+
+/**
+ * The settings keys an unknown-key rejection names, when the wording names them (zod).
+ * Empty for the AJV wording, which leaves the caller to find the key by retrying.
+ */
+export function unknownSettingsKeysNamedBy(error: unknown): string[] {
+  if (!isUnknownSettingsPropertyError(error)) return [];
+  const apiError = error as { message?: string; details?: unknown };
+  const haystack = `${apiError.message ?? ''} ${safeStringify(apiError.details)}`;
+  return parseUnrecognizedKeys(haystack, 'body/settings');
+}
+
+/**
+ * Whether n8n refused a workflow write because `settings` carried a property its Public API
+ * schema does not know, in either wording. Matches only the settings-level path; a top-level or
+ * nested rejection (`body`, `body/nodes/0`, `body/nodeGroups/0`) is a different problem.
+ */
+export function isUnknownSettingsPropertyError(error: unknown): boolean {
+  const apiError = error as { statusCode?: number; message?: string; details?: unknown } | null;
+  if (!apiError || apiError.statusCode !== 400) return false;
+  return SETTINGS_ADDITIONAL_PROPERTY.test(`${apiError.message ?? ''} ${safeStringify(apiError.details)}`);
+}
+
+/**
  * When n8n rejects a workflow write with "must NOT have additional properties", the AJV
  * message names the failing path (`request/body` or `request/body/settings`) but never the
  * offending key (#1047). By the time the error reaches an MCP handler the request payload is
@@ -160,8 +200,9 @@ export function enrichUnknownPropertyError(
   const detailsStr = safeStringify(error.details);
   const haystack = `${error.message} ${detailsStr}`;
 
-  const settingsLevel = /body\/settings must NOT have additional propert/i.test(haystack);
-  const bodyLevel = !settingsLevel && /body must NOT have additional propert/i.test(haystack);
+  const settingsLevel = SETTINGS_ADDITIONAL_PROPERTY.test(haystack);
+  const bodyLevel =
+    !settingsLevel && /body (?:must NOT have additional propert|Unrecognized key\(s\) in object)/i.test(haystack);
   if (!settingsLevel && !bodyLevel) return error;
 
   // Some n8n versions do name the property in the AJV error params — surface it when it is
@@ -171,28 +212,31 @@ export function enrichUnknownPropertyError(
     detailsStr.matchAll(/"additionalProperty"\s*:\s*"([^"]+)"/g),
     match => match[1]
   );
+  // The zod wording (n8n 2.37+ on create) names the keys in the message itself.
+  const zodNamed = parseUnrecognizedKeys(haystack, settingsLevel ? 'body/settings' : 'body');
   const named =
     namedMatches.length > 0 && namedMatches.every(name => name === namedMatches[0])
       ? namedMatches[0]
-      : undefined;
+      : zodNamed.length > 0
+        ? zodNamed.join(', ')
+        : undefined;
 
   const parts: string[] = [];
-  if (settingsLevel) {
+  if (named) {
+    // Nothing to inventory or report: n8n said which key it refused.
+    parts.push(`n8n identified the rejected property: ${named}.`);
+  } else if (settingsLevel) {
     const settings = sentBody.settings;
     const sentKeys =
       settings && typeof settings === 'object' && !Array.isArray(settings)
         ? Object.keys(settings)
         : [];
     parts.push(`Settings keys sent: ${sentKeys.join(', ') || '(none)'}.`);
-    if (named) {
-      parts.push(`n8n identified the rejected property: ${named}.`);
-    } else {
-      const unknown = sentKeys.filter(
-        key => !Object.prototype.hasOwnProperty.call(WORKFLOW_SETTINGS_PROPERTIES, key)
-      );
-      if (unknown.length > 0) {
-        parts.push(`Not in n8n-mcp's known settings table: ${unknown.join(', ')}.`);
-      }
+    const unknown = sentKeys.filter(
+      key => !Object.prototype.hasOwnProperty.call(WORKFLOW_SETTINGS_PROPERTIES, key)
+    );
+    if (unknown.length > 0) {
+      parts.push(`Not in n8n-mcp's known settings table: ${unknown.join(', ')}.`);
     }
     parts.push(
       'This usually means the instance stores a setting its Public API write schema rejects ' +
@@ -201,9 +245,6 @@ export function enrichUnknownPropertyError(
     );
   } else {
     parts.push(`Top-level keys sent: ${Object.keys(sentBody).join(', ') || '(none)'}.`);
-    if (named) {
-      parts.push(`n8n identified the rejected property: ${named}.`);
-    }
     parts.push(
       "One of these keys is not accepted by this instance's Public API write schema. " +
         'Please report the offending key at https://github.com/czlonkowski/n8n-mcp/issues.'

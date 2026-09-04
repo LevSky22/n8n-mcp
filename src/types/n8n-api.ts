@@ -31,6 +31,8 @@ export interface WorkflowNode {
   alwaysOutputData?: boolean;
   executeOnce?: boolean;
   webhookId?: string; // n8n assigns this for webhook/form/chat trigger nodes
+  /** Node-level telemetry tags, accepted by n8n's node write schema since 2.36. */
+  customTelemetryTags?: { tag?: Array<{ key: string; value: string }> };
 }
 
 export interface WorkflowConnection {
@@ -598,9 +600,16 @@ export interface FilteredNodeData {
   status: 'success' | 'error';
   error?: string;
   data?: {
-    input?: any[][];
-    output?: any[][];
+    /** Branches are `null` where n8n recorded no data on that port. */
+    input?: Array<any[] | null>;
+    output?: Array<any[] | null>;
     metadata: {
+      totalItems: number;
+      itemsShown: number;
+      truncated: boolean;
+    };
+    /** In summary and filtered modes, with `input`: inputs obey the same item limit, since AI sub-nodes fill them with whole prompts. */
+    inputMetadata?: {
       totalItems: number;
       itemsShown: number;
       truncated: boolean;
