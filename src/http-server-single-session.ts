@@ -723,7 +723,11 @@ export class SingleSessionHTTPServer {
         // context, so it is answered before either is looked at (#994). The
         // POST /mcp route runs the same guard earlier; this call covers
         // embedders that reach handleRequest directly (see mcp-engine.ts).
-        if (this.handleUnimplementedMethod(req, res)) {
+        // Stateless mode skips it: the SDK v2 dual-era handler answers
+        // `server/discover` itself and rejects unknown methods with -32601,
+        // whereas answering the probe here would hide the 2026-07-28 path
+        // from every client that probes before `initialize`.
+        if (this.transportMode !== 'stateless' && this.handleUnimplementedMethod(req, res)) {
           return;
         }
 
@@ -1635,7 +1639,10 @@ export class SingleSessionHTTPServer {
       // Answer unimplemented methods ahead of the multi-tenant header check: a
       // probe such as `server/discover` carries no tenant headers, and rejecting
       // it as a missing-tenant error would hide the -32601 the client waits for.
-      if (this.handleUnimplementedMethod(req, res)) return;
+      // Only the stateful (SDK 1.x session) path needs this; in stateless mode
+      // the dual-era handler serves `server/discover` and owns -32601 for the
+      // rest, so the probe must reach it (see handleStatelessRequest).
+      if (this.transportMode !== 'stateless' && this.handleUnimplementedMethod(req, res)) return;
 
       // Extract instance context from headers if present (for multi-tenant support)
       let instanceContext: InstanceContext | undefined;

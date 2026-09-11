@@ -144,6 +144,7 @@ import {
   isImplementedMcpMethod,
 } from '../../../src/http-server-single-session';
 import * as sdkTypes from '@modelcontextprotocol/sdk/types.js';
+import { toNodeHandler } from '@modelcontextprotocol/node';
 
 const TEST_AUTH_TOKEN = 'test-auth-token-with-more-than-32-characters';
 
@@ -545,5 +546,98 @@ describe('Unimplemented JSON-RPC methods return -32601 (#994)', () => {
       expect(sdkMethods.length).toBeGreaterThan(20);
       expect(sdkMethods.filter(method => !isImplementedMcpMethod(method))).toEqual([]);
     });
+  });
+});
+
+describe('stateless transport forwards server/discover to the dual-era handler', () => {
+  // In stateless mode the SDK v2 handler serves `server/discover` and owns
+  // -32601 for genuinely unknown methods. Answering the probe in the Express
+  // guard instead would make every 2026-07-28 client fall back to the
+  // initialize handshake and never reach the modern path.
+  const originalEnv = process.env;
+  let server: SingleSessionHTTPServer;
+  let consoleSpies: any[];
+
+  beforeEach(() => {
+    process.env = { ...originalEnv };
+    process.env.AUTH_TOKEN = TEST_AUTH_TOKEN;
+    process.env.PORT = '0';
+    process.env.MCP_HTTP_TRANSPORT_MODE = 'stateless';
+    delete process.env.ENABLE_MULTI_TENANT;
+    consoleSpies = [
+      vi.spyOn(console, 'log').mockImplementation(() => {}),
+      vi.spyOn(console, 'warn').mockImplementation(() => {}),
+      vi.spyOn(console, 'error').mockImplementation(() => {}),
+    ];
+    vi.clearAllMocks();
+    mockHandlers.get = [];
+    mockHandlers.post = [];
+    mockHandlers.delete = [];
+    mockHandlers.use = [];
+    rateLimitOptions.length = 0;
+    mockConsoleManager.wrapOperation.mockImplementation(async (fn: any) => fn());
+    applyTransportMocks();
+    // Stand in for the SDK v2 Node adapter: record that the request reached
+    // the dual-era handler and answer it the way the real handler would.
+    vi.mocked(toNodeHandler).mockImplementation(
+      () =>
+        (async (_req: any, res: any) => {
+          res.status(200).json({ jsonrpc: '2.0', id: 'probe-1', result: { reachedDualEraHandler: true } });
+        }) as any
+    );
+  });
+
+  afterEach(async () => {
+    process.env = originalEnv;
+    consoleSpies.forEach(spy => spy.mockRestore());
+    if (server) {
+      await server.shutdown();
+      server = null as any;
+    }
+  });
+
+  function findPostMcpHandler() {
+    const route = mockHandlers.post.find((r: any) => r.path === '/mcp');
+    return route ? route.handlers[route.handlers.length - 1] : null;
+  }
+
+  it('lets a session-less server/discover probe through the POST /mcp route', async () => {
+    server = new SingleSessionHTTPServer();
+    await server.start();
+    const handler = findPostMcpHandler();
+    const req = createMockReq({ jsonrpc: '2.0', method: 'server/discover', id: 'probe-1', params: {} });
+    const res = createMockRes();
+
+    await handler(req, res);
+
+    expect(toNodeHandler).toHaveBeenCalledTimes(1);
+    expect(res.status).toHaveBeenCalledWith(200);
+    expect(res.json.mock.calls[0][0].result).toEqual({ reachedDualEraHandler: true });
+  });
+
+  it('lets the probe through handleRequest directly (embedder path)', async () => {
+    server = new SingleSessionHTTPServer();
+    const req = createMockReq({ jsonrpc: '2.0', method: 'server/discover', id: 'probe-1', params: {} });
+    const res = createMockRes();
+
+    await server.handleRequest(req, res);
+
+    expect(toNodeHandler).toHaveBeenCalledTimes(1);
+    expect(res.json.mock.calls[0][0].result).toEqual({ reachedDualEraHandler: true });
+  });
+
+  it('keeps the -32601 guard for the stateful session path', async () => {
+    process.env.MCP_HTTP_TRANSPORT_MODE = 'stateful';
+    server = new SingleSessionHTTPServer();
+    await server.start();
+    const handler = findPostMcpHandler();
+    const req = createMockReq({ jsonrpc: '2.0', method: 'server/discover', id: 'probe-1', params: {} });
+    const res = createMockRes();
+
+    await handler(req, res);
+
+    expect(toNodeHandler).not.toHaveBeenCalled();
+    expect(res.status).toHaveBeenCalledWith(404);
+    expect(res.json.mock.calls[0][0].error.code).toBe(-32601);
   });
 });

@@ -18,9 +18,12 @@ export interface ProtocolNegotiationResult {
 }
 
 /**
- * Standard MCP protocol version (latest)
+ * Standard MCP protocol version offered to initialize-era clients. This is the
+ * newest revision the SDK 1.x session path supports; clients on the 2026-07-28
+ * revision never reach this negotiation because the stateless dual-era
+ * handler answers their `server/discover` probe directly.
  */
-export const STANDARD_PROTOCOL_VERSION = '2025-03-26';
+export const STANDARD_PROTOCOL_VERSION = '2025-11-25';
 
 /**
  * n8n specific protocol version (what n8n expects)
@@ -32,6 +35,8 @@ export const N8N_PROTOCOL_VERSION = '2024-11-05';
  */
 export const SUPPORTED_VERSIONS = [
   STANDARD_PROTOCOL_VERSION,
+  '2025-06-18',
+  '2025-03-26',
   N8N_PROTOCOL_VERSION,
   '2024-06-25', // Older fallback
 ];
