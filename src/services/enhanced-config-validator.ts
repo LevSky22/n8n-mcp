@@ -792,7 +792,13 @@ export class EnhancedConfigValidator extends ConfigValidator {
     // Validate rules.values structure if present
     if (config.rules.values && Array.isArray(config.rules.values)) {
       config.rules.values.forEach((rule: any, index: number) => {
-        if (!rule.conditions) {
+        // An entry that is not a rule at all gets a precise error from
+        // validateConditionNodeStructure ("rules.values[i]: rule is missing or not an object").
+        // Describing it as a rule missing its "conditions" property on top of that is noise
+        // pointing at the wrong repair (#1097).
+        if (!rule || typeof rule !== 'object' || Array.isArray(rule)) return;
+
+        if (!rule?.conditions) {
           result.warnings.push({
             type: 'missing_common',
             property: 'rules',
@@ -800,7 +806,7 @@ export class EnhancedConfigValidator extends ConfigValidator {
             suggestion: 'Each rule in the values array should have a "conditions" property'
           });
         }
-        if (!rule.outputKey && rule.renameOutput !== false) {
+        if (!rule?.outputKey && rule?.renameOutput !== false) {
           result.warnings.push({
             type: 'missing_common',
             property: 'rules',
@@ -1345,7 +1351,7 @@ export class EnhancedConfigValidator extends ConfigValidator {
 
     for (let i = 0; i < conditions.length; i++) {
       const condition = conditions[i];
-      if (!condition.operator || typeof condition.operator !== 'object') continue;
+      if (!condition?.operator || typeof condition.operator !== 'object') continue;
 
       const { type, operation } = condition.operator;
       if (!type || !operation) continue;

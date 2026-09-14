@@ -285,6 +285,109 @@ describe('handlers-n8n-manager', () => {
   });
 
   describe('handleCreateWorkflow', () => {
+    describe('malformed nodes with the real structure validator (#1071)', () => {
+      beforeEach(async () => {
+        const actual = await vi.importActual<typeof import('@/services/n8n-validation')>(
+          '@/services/n8n-validation'
+        );
+        vi.mocked(n8nValidation.validateWorkflowStructure).mockImplementation(actual.validateWorkflowStructure);
+      });
+
+      const validNode = {
+        id: '2', name: 'Bad Node', type: 'n8n-nodes-base.set',
+        typeVersion: 1, position: [200, 0], parameters: {},
+      };
+      const cases = [
+        { label: 'null entry', node: null },
+        { label: 'string entry', node: 'strayString' },
+        { label: 'number entry', node: 123 },
+        { label: 'array entry', node: [] },
+        { label: 'missing name', node: { ...validNode, name: undefined } },
+        { label: 'non-string name', node: { ...validNode, name: 123 } },
+        { label: 'missing type', node: { ...validNode, type: undefined } },
+        { label: 'non-string type', node: { ...validNode, type: 123 } },
+      ];
+
+      it.each(cases.flatMap(testCase => [
+        { ...testCase, connected: false },
+        { ...testCase, connected: true },
+      ]))('rejects $label (connected=$connected) before creating a workflow', async ({ node, connected }) => {
+        const input = {
+          name: 'Malformed workflow',
+          nodes: [
+            { ...validNode, id: '1', name: 'Manual Trigger', type: 'n8n-nodes-base.manualTrigger' },
+            node,
+          ],
+          connections: connected ? {
+            'Manual Trigger': { main: [[{
+              node: typeof node === 'string' ? node : 'Bad Node', type: 'main', index: 0,
+            }]] },
+          } : {},
+        };
+
+        const result = await handlers.handleCreateWorkflow(input);
+
+        expect(result.success).toBe(false);
+        expect(result.error).toBe('Workflow validation failed');
+        expect(result.details.errors).toEqual(expect.arrayContaining([
+          expect.stringContaining('Invalid node at index 1:'),
+        ]));
+        expect(mockApiClient.createWorkflow).not.toHaveBeenCalled();
+        expect(telemetryMocks.trackWorkflowCreation).toHaveBeenCalledWith(input, false);
+      });
+
+      it('still creates a valid connected workflow', async () => {
+        const input = {
+          name: 'Valid workflow',
+          nodes: [
+            { ...validNode, id: '1', name: 'Manual Trigger', type: 'n8n-nodes-base.manualTrigger' },
+            { ...validNode, name: 'Process Data' },
+          ],
+          connections: { 'Manual Trigger': { main: [[{ node: 'Process Data', type: 'main', index: 0 }]] } },
+        };
+        mockApiClient.createWorkflow.mockResolvedValue({ ...input, id: 'created-id', active: false });
+
+        const result = await handlers.handleCreateWorkflow(input);
+
+        expect(result.success).toBe(true);
+        expect(mockApiClient.createWorkflow).toHaveBeenCalledOnce();
+        expect(mockApiClient.createWorkflow).toHaveBeenCalledWith(input, expect.any(Object));
+      });
+
+      // The same class one level down (#1094): the graph traversal walked these before the
+      // connection schema parsed them, so a null source entry threw out of the validator.
+      it.each([
+        { label: 'a null source entry', connections: { 'Manual Trigger': null } },
+        { label: 'a null output', connections: { 'Manual Trigger': { main: null } } },
+        { label: 'a flattened branch', connections: { 'Manual Trigger': { main: [{ node: 'Process Data', type: 'main', index: 0 }] } } },
+        { label: 'a null connection', connections: { 'Manual Trigger': { main: [[null]] } } },
+      ])('rejects $label before creating a workflow', async ({ connections }) => {
+        const input = {
+          name: 'Malformed connections',
+          nodes: [
+            { ...validNode, id: '1', name: 'Manual Trigger', type: 'n8n-nodes-base.manualTrigger' },
+            { ...validNode, name: 'Process Data' },
+          ],
+          connections,
+        };
+
+        const result = await handlers.handleCreateWorkflow(input);
+
+        expect(result.success).toBe(false);
+        expect(result.error).toBe('Workflow validation failed');
+        expect(mockApiClient.createWorkflow).not.toHaveBeenCalled();
+
+        // The old trailing parse also produced an "Invalid connections:" line, so matching only
+        // that would pass against the unfixed code. What changed is that the line is collapsed
+        // rather than the Zod issue array serialized as JSON, and that it is the whole answer -
+        // the graph findings computed over the broken connection are gone.
+        const [connectionError, ...rest] = result.details.errors;
+        expect(connectionError).toMatch(/^Invalid connections: /);
+        expect(connectionError).not.toContain('{');
+        expect(rest).toEqual([]);
+      });
+    });
+
     it('should create workflow successfully', async () => {
       const testWorkflow = createTestWorkflow();
       const input = {
@@ -2145,6 +2248,46 @@ describe('handlers-n8n-manager', () => {
 
       expect(result.success).toBe(false);
       expect(result.error).toContain('not configured');
+    });
+  });
+
+  describe('handleUpdateWorkflow - malformed nodes with the real structure validator (#1071)', () => {
+    beforeEach(async () => {
+      const actual = await vi.importActual<typeof import('@/services/n8n-validation')>(
+        '@/services/n8n-validation'
+      );
+      vi.mocked(n8nValidation.validateWorkflowStructure).mockImplementation(actual.validateWorkflowStructure);
+
+      const workflow = createTestWorkflow({
+        id: 'wf-1',
+        nodes: [{ id: 'node-1', name: 'Set', type: 'n8n-nodes-base.set', typeVersion: 3, position: [0, 0], parameters: {} }],
+      });
+      mockApiClient.getWorkflow.mockResolvedValue(workflow);
+      mockApiClient.updateWorkflow.mockResolvedValue(workflow);
+    });
+
+    // The credential-preservation merge reads node.credentials off every submitted entry, and
+    // it runs before the validator - so a null entry threw there instead of being reported.
+    it.each([
+      { label: 'null', node: null },
+      { label: 'a string', node: 'strayString' },
+      { label: 'a non-string type', node: { id: '2', name: 'Bad', type: 123, typeVersion: 1, position: [200, 0], parameters: {} } },
+    ])('rejects $label in nodes without calling the update API', async ({ node }) => {
+      const result = await handlers.handleUpdateWorkflow({
+        id: 'wf-1',
+        nodes: [
+          { id: 'node-1', name: 'Set', type: 'n8n-nodes-base.set', typeVersion: 3, position: [0, 0], parameters: {} },
+          node,
+        ],
+        connections: {},
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.error).toBe('Workflow validation failed');
+      expect(result.details.errors).toEqual(expect.arrayContaining([
+        expect.stringContaining('Invalid node at index 1:'),
+      ]));
+      expect(mockApiClient.updateWorkflow).not.toHaveBeenCalled();
     });
   });
 

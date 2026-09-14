@@ -62,6 +62,9 @@ export function cleanNodeForApi(node: WorkflowNode): WorkflowNode {
 }
 
 // Connection array schema used by all connection types
+// The Public API stores a null branch verbatim - verified by POSTing such a workflow to a live
+// instance (#1096). Rejecting it here failed creates that validate_workflow had just passed,
+// with no way for the caller to tell which of the two validators was wrong.
 const connectionArraySchema = z.array(
   z.array(
     z.object({
@@ -69,7 +72,7 @@ const connectionArraySchema = z.array(
       type: z.string(),
       index: z.number(),
     })
-  )
+  ).nullable()
 );
 
 /**
@@ -289,6 +292,21 @@ export function cleanWorkflowForUpdate(workflow: Workflow): Partial<Workflow> {
   return cleanedWorkflow as Partial<Workflow>;
 }
 
+/**
+ * A failed Zod parse carries the whole issue array serialised as JSON in `error.message`,
+ * which reaches MCP clients as a dozen lines per malformed node or connection. Collapse it
+ * to one clause per issue: the offending field, then the reason.
+ */
+function describeParseFailure(error: unknown): string {
+  if (!(error instanceof z.ZodError)) {
+    return error instanceof Error ? error.message : 'Unknown error';
+  }
+
+  return error.issues
+    .map(issue => (issue.path.length > 0 ? `"${issue.path.join('.')}": ${issue.message}` : issue.message))
+    .join('; ');
+}
+
 // Validate workflow structure
 export function validateWorkflowStructure(workflow: Partial<Workflow>): string[] {
   const errors: string[] = [];
@@ -302,6 +320,33 @@ export function validateWorkflowStructure(workflow: Partial<Workflow>): string[]
     errors.push('Workflow must have at least one node');
   }
 
+  // Validate node shapes before graph checks inspect names, types, or parameters.
+  if (workflow.nodes) {
+    if (!Array.isArray(workflow.nodes)) {
+      errors.push('Workflow nodes must be an array');
+      return errors;
+    }
+
+    const nodes: WorkflowNode[] = [];
+    const shapeErrors: string[] = [];
+    for (const [index, node] of workflow.nodes.entries()) {
+      try {
+        nodes.push(validateWorkflowNode(node));
+      } catch (error) {
+        shapeErrors.push(`Invalid node at index ${index}: ${describeParseFailure(error)}`);
+      }
+    }
+
+    // Connectivity computed over a node of unknown shape is misleading, so the shape
+    // errors are the whole answer when there are any.
+    if (shapeErrors.length > 0) {
+      return [...errors, ...shapeErrors];
+    }
+
+    // Use normalized fields without changing the caller's workflow.
+    workflow = { ...workflow, nodes };
+  }
+
   // Check if workflow has only non-executable nodes (sticky notes)
   if (workflow.nodes && workflow.nodes.length > 0) {
     const hasExecutableNodes = workflow.nodes.some(node => !isNonExecutableNode(node.type));
@@ -312,6 +357,16 @@ export function validateWorkflowStructure(workflow: Partial<Workflow>): string[]
 
   if (!workflow.connections) {
     errors.push('Workflow connections are required');
+  } else {
+    // Same reasoning as the node gate above, one level down: the disconnected-node scan, the
+    // Switch branch counts and the reference checks all walk this object without checking it,
+    // so a malformed source entry throws mid-traversal and escapes the validator (#1094).
+    // Parsing here also normalizes MCP-mangled input, so those checks see the repaired shape.
+    try {
+      workflow = { ...workflow, connections: validateWorkflowConnections(workflow.connections) };
+    } catch (error) {
+      return [...errors, `Invalid connections: ${describeParseFailure(error)}`];
+    }
   }
 
   // Check for minimum viable workflow
@@ -397,20 +452,13 @@ export function validateWorkflowStructure(workflow: Partial<Workflow>): string[]
     }
   }
 
-  // Validate nodes
+  // Check for common node type mistakes after node shapes have been validated.
   if (workflow.nodes) {
     workflow.nodes.forEach((node, index) => {
-      try {
-        validateWorkflowNode(node);
-        
-        // Additional check for common node type mistakes
-        if (node.type.startsWith('nodes-base.')) {
-          errors.push(`Invalid node type "${node.type}" at index ${index}. Use "n8n-nodes-base.${node.type.substring(11)}" instead.`);
-        } else if (!node.type.includes('.')) {
-          errors.push(`Invalid node type "${node.type}" at index ${index}. Node types must include package prefix (e.g., "n8n-nodes-base.webhook").`);
-        }
-      } catch (error) {
-        errors.push(`Invalid node at index ${index}: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      if (node.type.startsWith('nodes-base.')) {
+        errors.push(`Invalid node type "${node.type}" at index ${index}. Use "n8n-nodes-base.${node.type.substring(11)}" instead.`);
+      } else if (!node.type.includes('.')) {
+        errors.push(`Invalid node type "${node.type}" at index ${index}. Node types must include package prefix (e.g., "n8n-nodes-base.webhook").`);
       }
     });
   }
@@ -423,15 +471,6 @@ export function validateWorkflowStructure(workflow: Partial<Workflow>): string[]
         errors.push(...filterErrors.map(err => `Node "${node.name}" (index ${index}): ${err}`));
       }
     });
-  }
-
-  // Validate connections
-  if (workflow.connections) {
-    try {
-      validateWorkflowConnections(workflow.connections);
-    } catch (error) {
-      errors.push(`Invalid connections: ${error instanceof Error ? error.message : 'Unknown error'}`);
-    }
   }
 
   // Validate active workflows have activatable triggers
@@ -451,15 +490,16 @@ export function validateWorkflowStructure(workflow: Partial<Workflow>): string[]
 
   // Validate Switch and IF node connection structures match their rules
   if (workflow.nodes && workflow.connections) {
-    const switchNodes = workflow.nodes.filter(n => {
-      if (n.type !== 'n8n-nodes-base.switch') return false;
-      const mode = (n.parameters as any)?.mode;
-      return !mode || mode === 'rules'; // Default mode is 'rules'
-    });
+    const switchNodes = workflow.nodes.filter(isRulesModeSwitch);
+
+    const ruleLabel = (rule: any, i: number) =>
+      typeof rule?.outputKey === 'string' ? `"${rule.outputKey}" (index ${i})` : `Rule ${i}`;
 
     for (const switchNode of switchNodes) {
       const params = switchNode.parameters as any;
-      const rules = params?.rules?.rules || [];
+      // Caller-supplied: a string or an object with a `length` reaches the branch-count read
+      // below and then has no `.map` (#1094). Only an array describes rules.
+      const rules = Array.isArray(params?.rules?.rules) ? params.rules.rules : [];
       const nodeConnections = workflow.connections[switchNode.name];
 
       if (rules.length > 0 && nodeConnections?.main) {
@@ -467,9 +507,7 @@ export function validateWorkflowStructure(workflow: Partial<Workflow>): string[]
 
         // Switch nodes in "rules" mode need output branches matching rules count
         if (outputBranches !== rules.length) {
-          const ruleNames = rules.map((r: any, i: number) =>
-            r.outputKey ? `"${r.outputKey}" (index ${i})` : `Rule ${i}`
-          ).join(', ');
+          const ruleNames = rules.map(ruleLabel).join(', ');
 
           errors.push(
             `Switch node "${switchNode.name}" has ${rules.length} rules [${ruleNames}] ` +
@@ -481,17 +519,17 @@ export function validateWorkflowStructure(workflow: Partial<Workflow>): string[]
         }
 
         // Check for empty output branches (except trailing ones)
-        const nonEmptyBranches = nodeConnections.main.filter((branch: any[]) => branch.length > 0).length;
+        // A null branch now survives the schema above (#1096), so it counts as unconnected
+        // rather than reaching `.length` on null.
+        const branchSize = (branch: unknown) => (Array.isArray(branch) ? branch.length : 0);
+        const nonEmptyBranches = nodeConnections.main.filter((branch: unknown) => branchSize(branch) > 0).length;
         if (nonEmptyBranches < rules.length) {
           const emptyIndices = nodeConnections.main
-            .map((branch: any[], i: number) => branch.length === 0 ? i : -1)
+            .map((branch: unknown, i: number) => branchSize(branch) === 0 ? i : -1)
             .filter((i: number) => i !== -1 && i < rules.length);
 
           if (emptyIndices.length > 0) {
-            const ruleInfo = emptyIndices.map((i: number) => {
-              const rule = rules[i];
-              return rule.outputKey ? `"${rule.outputKey}" (index ${i})` : `Rule ${i}`;
-            }).join(', ');
+            const ruleInfo = emptyIndices.map((i: number) => ruleLabel(rules[i], i)).join(', ');
 
             errors.push(
               `Switch node "${switchNode.name}" has unconnected output${emptyIndices.length !== 1 ? 's' : ''}: ${ruleInfo}. ` +
@@ -573,16 +611,53 @@ export function validateConditionNodeStructure(node: WorkflowNode): string[] {
     if (typeVersion >= 2) {
       errors.push(...validateFilterConditionOperators(node.parameters?.conditions, 'conditions'));
     }
-  } else if (node.type === 'n8n-nodes-base.switch') {
-    if (typeVersion >= 3.2) {
-      const rules = node.parameters?.rules as any;
-      if (rules?.rules && Array.isArray(rules.rules)) {
-        rules.rules.forEach((rule: any, i: number) => {
-          errors.push(...validateFilterConditionOperators(rule.conditions, `rules.rules[${i}].conditions`));
-        });
-      }
-    }
+  } else if (isRulesModeSwitch(node) && typeVersion >= 3.2) {
+    const rules = node.parameters?.rules as any;
+
+    // `values` is the key n8n actually reads: the `rules` fixedCollection declares one option
+    // and it is named `values`. Validating only `rules.rules` meant the operator checks below
+    // never ran for 319 of the 448 Switch nodes in the bundled templates (#1097). Both keys are
+    // walked - the legacy one still reaches the branch-count check in validateWorkflowStructure.
+    errors.push(...validateSwitchRuleCollection(rules?.values, 'rules.values'));
+    errors.push(...validateSwitchRuleCollection(rules?.rules, 'rules.rules'));
   }
+
+  return errors;
+}
+
+/**
+ * A Switch that routes on conditions. Expression- and json-mode Switches can retain a stale
+ * hidden rule collection that n8n ignores at runtime, so neither the rule validation nor the
+ * branch-count check in validateWorkflowStructure should read it. Mode defaults to "rules".
+ */
+function isRulesModeSwitch(node: WorkflowNode): boolean {
+  if (node.type !== 'n8n-nodes-base.switch') return false;
+  const mode = (node.parameters as any)?.mode;
+  return !mode || mode === 'rules';
+}
+
+/**
+ * Validate one Switch rule collection, `rules.values` or the legacy `rules.rules`.
+ *
+ * A present collection that is not an array is reported rather than read as zero rules: the
+ * branch-count check in validateWorkflowStructure falls back to an empty array so a string
+ * cannot reach its `.map`, and without this nothing would say why (#1094). An absent one is
+ * left alone - a Switch carries its rules under one key, not both.
+ */
+function validateSwitchRuleCollection(collection: any, path: string): string[] {
+  if (collection === undefined || collection === null) return [];
+  if (!Array.isArray(collection)) return [`${path}: rules is not an array`];
+
+  const errors: string[] = [];
+  collection.forEach((rule: any, i: number) => {
+    // Report an entry that is not a rule rather than reading `conditions` off it: the
+    // branch-count check in validateWorkflowStructure reads these entries too (#1094).
+    if (!rule || typeof rule !== 'object' || Array.isArray(rule)) {
+      errors.push(`${path}[${i}]: rule is missing or not an object`);
+      return;
+    }
+    errors.push(...validateFilterConditionOperators(rule.conditions, `${path}[${i}].conditions`));
+  });
 
   return errors;
 }
@@ -593,7 +668,7 @@ function validateFilterConditionOperators(conditions: any, path: string): string
 
   conditions.conditions.forEach((condition: any, i: number) => {
     errors.push(...validateOperatorStructure(
-      condition.operator,
+      condition?.operator,
       `${path}.conditions[${i}].operator`
     ));
   });
@@ -603,6 +678,29 @@ function validateFilterConditionOperators(conditions: any, path: string): string
 /** @deprecated Use validateConditionNodeStructure instead */
 export function validateFilterBasedNodeMetadata(node: WorkflowNode): string[] {
   return validateConditionNodeStructure(node);
+}
+
+/**
+ * The data types a filter operator may declare - n8n's own FilterOperatorType. `any` is in it
+ * and n8n's runtime short-circuits validation for that type (filter-parameter.js:
+ * `if (type === 'any' ...) return {valid: true}`), so reporting it would be a false positive.
+ * None of the 2,352 bundled templates carries one, but #1097 points this check at the key real
+ * workflows use, so the exposure is no longer theoretical.
+ */
+export const FILTER_OPERATOR_TYPES = ['string', 'number', 'boolean', 'dateTime', 'array', 'object', 'any'];
+
+/**
+ * Name a rejected operator field for an error message without coercing it. JSON can express an
+ * object that throws `Cannot convert object to primitive value` on interpolation
+ * (`{"toString": null, "valueOf": null}`), which turned a reportable malformed operator into an
+ * internal failure - the defect class 2.84.1 through 2.84.3 closed elsewhere.
+ */
+export function describeOperatorValue(value: unknown): string {
+  if (value === null) return 'null';
+  if (value === undefined) return 'nothing';
+  if (Array.isArray(value)) return 'an array';
+  if (typeof value === 'object') return 'an object';
+  return typeof value === 'string' ? `"${value}"` : `a ${typeof value} (${String(value)})`;
 }
 
 /**
@@ -621,17 +719,14 @@ export function validateOperatorStructure(operator: any, path: string): string[]
   if (!operator.type) {
     errors.push(
       `${path}: missing required field "type". ` +
-      'Must be a data type: "string", "number", "boolean", "dateTime", "array", or "object"'
+      `Must be a data type: ${FILTER_OPERATOR_TYPES.map(t => `"${t}"`).join(', ')}`
     );
-  } else {
-    const validTypes = ['string', 'number', 'boolean', 'dateTime', 'array', 'object'];
-    if (!validTypes.includes(operator.type)) {
-      errors.push(
-        `${path}: invalid type "${operator.type}". ` +
-        `Type must be a data type (${validTypes.join(', ')}), not an operation name. ` +
-        'Did you mean to use the "operation" field?'
-      );
-    }
+  } else if (!FILTER_OPERATOR_TYPES.includes(operator.type)) {
+    errors.push(
+      `${path}: invalid type ${describeOperatorValue(operator.type)}. ` +
+      `Type must be a data type (${FILTER_OPERATOR_TYPES.join(', ')}), not an operation name. ` +
+      'Did you mean to use the "operation" field?'
+    );
   }
 
   // Check required field: operation
