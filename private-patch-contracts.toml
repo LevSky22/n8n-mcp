@@ -1,0 +1,111 @@
+version = 1
+
+# Ledger for the ValStratis n8n-mcp fork. Created 2026-09-14 during the
+# v2.84.4 upgrade: until then the 46 private commits were tracked only in Git
+# history and vault prose, which made "does this patch still need to exist?"
+# unanswerable by tool. Each contract below names the behaviour we depend on,
+# the upstream reference that could retire it, and the focused validation that
+# proves it still holds. Verify against Git and code; do not trust blindly.
+
+[stack]
+name = "ValStratis n8n-mcp"
+upstream = "https://github.com/czlonkowski/n8n-mcp.git"
+private_repository = "https://github.com/LevSky22/n8n-mcp.git"
+base_ref = "v2.84.4"
+tracked_tip = "67db322abaa083f8152749da0c7c036dbaa88a63"
+production_branch = "fix/stateless-discover-passthrough"
+deployment_contract = "/srv/infra/config/n8n-mcp/docker-compose.yml"
+release_gate = "Artifact-v3 release gate, brain/internal/systems/tools/n8n-mcp.md"
+
+[[patches]]
+id = "stateless-dual-era-transport"
+commits = ["b5acbfe2", "d07b2796", "4143f525", "15a5e5ed"]
+subject = "Stateless Streamable HTTP transport serving both MCP protocol eras"
+classification = "private"
+upstream_status = "closed-unmerged"
+upstream_refs = ["https://github.com/czlonkowski/n8n-mcp/pull/943"]
+retire_when = "Never, unless upstream adopts an equivalent stateless dual-era transport. PR #943 was closed with merged_at=null on 2026-09-02, so this work is permanently ours."
+validation = [
+  "npx vitest run tests/unit/http-server",
+  "initialize over MCP-Protocol-Version 2025-06-18 negotiates 2025-06-18, and 2025-03-26 negotiates 2025-03-26",
+]
+notes = """
+15a5e5ed is the load-bearing line: upstream 2.69.1 (#995) added an
+unimplemented-method guard that answered server/discover with -32601 before the
+request reached the stateless dual-era handler. Both guards are spelled
+`this.transportMode !== 'stateless'` in src/http-server-single-session.ts.
+"""
+
+[[patches]]
+id = "bounded-response-artifacts"
+commits = ["d29cfdcb", "cc3fd843", "b9222576", "14265de2", "ead87bcd", "a491d0fb", "a80afb88", "1670fcf0", "c1b86628", "a0689483", "0048c435", "28e9c0fb", "991095e3"]
+subject = "Response artifact contract v3: bounded, queryable, camelCase, protocol-native descriptors"
+classification = "private"
+upstream_status = "open-pr"
+upstream_refs = ["https://github.com/czlonkowski/n8n-mcp/pull/977"]
+retire_when = "PR #977 merges AND the merged contract is camelCase-strict, exposes exactly artifactId/responsePath/fields/filters/pageSize/cursor/describe/objectMode/textSearch, and fails an invalid pointer with INVALID_RESPONSE_PATH listing child pointers."
+validation = [
+  "npx vitest run tests/unit/mcp/response-artifact-tool.test.ts tests/unit/services/mcp-response-bounding.test.ts tests/unit/mcp/tool-docs-coverage.test.ts tests/unit/mcp/additional-tools.test.ts",
+  "Artifact-v3 release gate against a live artifact: omitted responsePath, case-insensitive icontains, textSearch, and an actionable INVALID_RESPONSE_PATH",
+]
+notes = """
+An image name is not evidence this survived a merge: images through
+n8n-mcp:dual-era-2.69.0-artifacts-v2-a42a9eb carried the v2 tag while shipping
+the pre-v2 implementation. Always run the live gate before changing a pin.
+"""
+
+[[patches]]
+id = "native-sqlite-runtime"
+commits = ["c8052db2"]
+subject = "Compile better-sqlite3 in the runtime stage instead of falling back to sql.js"
+classification = "private"
+upstream_status = "not-submitted"
+upstream_refs = []
+retire_when = "Upstream's published runtime image compiles better-sqlite3, or sql.js stops leaking memory on long-lived sidecars."
+validation = ["docker run --rm --entrypoint node <image> -e \"new (require('better-sqlite3'))('/app/data/nodes.db',{readonly:true})\""]
+
+[[patches]]
+id = "runtime-security-upgrades"
+commits = ["a42a9eb0", "79ddf606", "2dd70f7c", "8f9e3207"]
+subject = "Pin patched brace-expansion, ip-address and tar beneath the npm runtime"
+classification = "private"
+upstream_status = "not-submitted"
+upstream_refs = []
+retire_when = "The base image ships these transitive dependencies already patched; re-check every upstream bump and drop the pins that no longer change a version."
+validation = ["Trivy scan of the exact built image reports zero fixable HIGH/CRITICAL findings"]
+
+[[patches]]
+id = "isolated-vm-build-stub"
+commits = ["4d944d36"]
+subject = "Keep the isolated-vm empty-package override in the builder stage"
+classification = "private"
+upstream_status = "not-submitted"
+upstream_refs = []
+retire_when = "n8n stops pulling isolated-vm into the type-only build graph, or upstream's Dockerfile carries the same override."
+validation = ["docker build succeeds without attempting an isolated-vm native compile"]
+
+[[patches]]
+id = "camelcase-tool-inputs"
+commits = ["98580864"]
+subject = "Reject snake_case artifact tool arguments end to end"
+classification = "private"
+upstream_status = "open-pr"
+upstream_refs = ["https://github.com/czlonkowski/n8n-mcp/pull/977"]
+retire_when = "Retires with bounded-response-artifacts; it is the strictness half of contract v3."
+validation = ["npx vitest run tests/unit/mcp/response-artifact-tool.test.ts"]
+
+[[patches]]
+id = "docker-runtime-version-hygiene"
+commits = ["59dcfd3a", "85dadd40", "9c440b2e", "04421d34"]
+subject = "Align package.runtime.json version with the release and normalize runtime script permissions"
+classification = "maintenance"
+upstream_status = "not-submitted"
+upstream_refs = []
+retire_when = "Upstream's own release tooling keeps package.runtime.json in lockstep; re-evaluate whenever scripts/update-n8n-deps.js changes."
+validation = ["/health reports the same version as package.json"]
+
+# Test-only commits carried for the contracts above, retiring with their parent:
+#   932d6797 2f3243b2 4a4c19b2 ec074c3a 1e923443 47d66d8d 7cc96f09 e8706eaf 2a49b108
+# Upstream sync merges, which are not contracts:
+#   9dc0fff3 5c6744f8 46df0bed 8f2cc648 9db62a0e 9fb302bf a9b8e2a5 0c325428 86368470
+#   67db322a
